@@ -6,6 +6,7 @@ reused on its own.
 """
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -17,6 +18,11 @@ PRODUCT_COL = "product_url"
 WORKERS = 20
 TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (compatible; LinkChecker/2.0)"
+
+# Confirmed-dead responses — the resource is actually gone.
+CONFIRMED_BROKEN_CODES = (404, 410)
+# Transient responses worth one retry before judging them at all.
+RETRYABLE_CODES = (429, 503)
 
 
 def new_session(pool_size: int = WORKERS) -> requests.Session:
@@ -35,9 +41,38 @@ def new_executor(max_workers: int = WORKERS) -> ThreadPoolExecutor:
     return ThreadPoolExecutor(max_workers=max_workers)
 
 
+def _retry_delay(response, default: float = 2.0, cap: float = 5.0) -> float:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return min(float(retry_after), cap)
+        except ValueError:
+            pass
+    return default
+
+
+def _classify(code: int):
+    """Maps a status code to (label, is_broken).
+
+    Only a confirmed-dead response counts as BROKEN. Everything else that
+    isn't a clean success is REVIEW — the link might be fine (rate-limited,
+    needs login, a flaky server error) but we can't be confident it's dead.
+    """
+    if code == 403:
+        return ("OK (403 - blocked bot)", False)
+    if 200 <= code < 400:
+        return (f"OK ({code})", False)
+    if code in CONFIRMED_BROKEN_CODES:
+        return (f"BROKEN ({code})", True)
+    return (f"REVIEW ({code})", False)
+
+
 def check_url(session: requests.Session, url: str, timeout: int = TIMEOUT):
     """Returns (status_label, is_broken). Tries HEAD first (cheaper), falls
-    back to GET if the server rejects HEAD or the HEAD request itself fails."""
+    back to GET if the server rejects HEAD or the HEAD request itself fails.
+    A 429/503 (rate-limited / temporarily unavailable) gets one retry after
+    a short backoff before being judged, since those are about our request
+    volume or a momentary blip, not about whether the link is dead."""
     if not isinstance(url, str) or not url.strip():
         return ("--", False)
 
@@ -61,12 +96,16 @@ def check_url(session: requests.Session, url: str, timeout: int = TIMEOUT):
                              headers=headers, stream=True)
             r.close()
 
-        code = r.status_code
-        if code == 403:
-            return ("OK (403 - blocked bot)", False)
-        if 200 <= code < 400:
-            return (f"OK ({code})", False)
-        return (f"BROKEN ({code})", True)
+        if r.status_code in RETRYABLE_CODES:
+            time.sleep(_retry_delay(r))
+            try:
+                r = session.get(url, timeout=timeout, allow_redirects=True,
+                                 headers=headers, stream=True)
+                r.close()
+            except requests.exceptions.RequestException:
+                pass
+
+        return _classify(r.status_code)
 
     except requests.exceptions.ConnectionError:
         return ("BROKEN - Cannot connect", True)
@@ -98,8 +137,11 @@ def check_file(path: str, session: requests.Session, executor: ThreadPoolExecuto
     Checks all Image Url + product_url links in a file using the shared
     session/executor passed in.
 
-    Returns (broken_df, total_rows, total_broken). broken_df contains ONLY
-    the broken rows, plus two extra columns: 'Image 404' and 'Product 404'.
+    Returns (broken_df, review_df, total_rows, total_broken, total_review).
+    broken_df contains only confirmed-dead rows (404/410/unreachable);
+    review_df contains rows with an ambiguous response (needs login, still
+    rate-limited after retry, server error, etc.) that isn't confidently
+    broken. Both have two extra columns: 'Image 404' and 'Product 404'.
     """
     df = load_df(path)
 
@@ -135,10 +177,11 @@ def check_file(path: str, session: requests.Session, executor: ThreadPoolExecuto
             progress_callback(pct, done_count, total)
 
             name = str(df["product name"].iloc[idx])[:40] if "product name" in df.columns else f"Row {idx + 1}"
-            if "BROKEN" in img_res[idx]:
-                log_callback(f"[{idx + 1}] {name} — Image: {img_res[idx]}", "bad")
-            if "BROKEN" in prod_res[idx]:
-                log_callback(f"[{idx + 1}] {name} — Product: {prod_res[idx]}", "bad")
+            for col_label, res in (("Image", img_res[idx]), ("Product", prod_res[idx])):
+                if "BROKEN" in res:
+                    log_callback(f"[{idx + 1}] {name} — {col_label}: {res}", "bad")
+                elif "REVIEW" in res:
+                    log_callback(f"[{idx + 1}] {name} — {col_label}: {res}", "warn")
 
     df_out = df.copy()
     df_out["Image 404"] = img_res
@@ -148,6 +191,13 @@ def check_file(path: str, session: requests.Session, executor: ThreadPoolExecuto
         df_out["Image 404"].str.contains("BROKEN", na=False)
         | df_out["Product 404"].str.contains("BROKEN", na=False)
     )
+    review_mask = (
+        df_out["Image 404"].str.contains("REVIEW", na=False)
+        | df_out["Product 404"].str.contains("REVIEW", na=False)
+    ) & ~broken_mask
+
     broken_df = df_out[broken_mask].copy()
+    review_df = df_out[review_mask].copy()
     total_broken = int(broken_mask.sum())
-    return broken_df, total, total_broken
+    total_review = int(review_mask.sum())
+    return broken_df, review_df, total, total_broken, total_review

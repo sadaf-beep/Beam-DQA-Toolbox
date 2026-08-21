@@ -13,6 +13,7 @@ MUTED = "#64748b"
 GOOD = "#4ade80"
 BAD = "#f87171"
 INFO = "#93c5fd"
+WARN = "#facc15"
 
 MONO_FONT = "Consolas, 'Courier New', monospace"
 

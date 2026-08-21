@@ -19,6 +19,7 @@ class FileRow:
         self.error = None
         self.done = False
         self.broken_count = 0
+        self.review_count = 0
         self.on_change = on_change
 
         self.name_text = ft.Text(
@@ -98,6 +99,7 @@ def build(page: ft.Page) -> ft.Control:
     files_box, files_val = stat_box("FILES", theme.ACCENT)
     rows_box, rows_val = stat_box("TOTAL ROWS", theme.TEXT)
     broken_box, broken_val = stat_box("BROKEN LINKS", theme.BAD)
+    review_box, review_val = stat_box("NEEDS REVIEW", theme.WARN)
     done_box, done_val = stat_box("FILES DONE", theme.GOOD)
 
     save_label = ft.Text("No folder selected", size=12, color=theme.MUTED,
@@ -109,7 +111,7 @@ def build(page: ft.Page) -> ft.Control:
 
     def log(msg, tag="info"):
         color = {"ok": theme.GOOD, "bad": theme.BAD, "info": theme.INFO,
-                 "dim": theme.MUTED}.get(tag, theme.TEXT)
+                 "dim": theme.MUTED, "warn": theme.WARN}.get(tag, theme.TEXT)
         log_view.controls.append(ft.Text(msg, size=11, color=color, font_family=theme.MONO_FONT))
         page.update()
 
@@ -119,6 +121,7 @@ def build(page: ft.Page) -> ft.Control:
         rows_val.value = str(sum(len(r.df) for r in valid))
         done_val.value = str(sum(1 for r in valid if r.done))
         broken_val.value = str(sum(r.broken_count for r in valid))
+        review_val.value = str(sum(r.review_count for r in valid))
         page.update()
 
     def check_ready():
@@ -203,7 +206,7 @@ def build(page: ft.Page) -> ft.Control:
             log(f"  {msg}", tag)
 
         try:
-            broken_df, total_rows, broken_count = core.check_file(
+            broken_df, review_df, total_rows, broken_count, review_count = core.check_file(
                 row.path, session, executor, on_progress, on_log)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -212,14 +215,28 @@ def build(page: ft.Page) -> ft.Control:
             out_path = os.path.join(save_dir["path"], out_name)
             broken_df.to_csv(out_path, index=False)
 
+            review_path = None
+            if review_count > 0:
+                review_name = f"{base_name}_NEEDS_REVIEW_{timestamp}.csv"
+                review_path = os.path.join(save_dir["path"], review_name)
+                review_df.to_csv(review_path, index=False)
+
             row.broken_count = broken_count
+            row.review_count = review_count
             row.done = True
-            if broken_count == 0:
-                row.set_status("Done — 0 broken", theme.GOOD)
+            status_bits = [f"{broken_count} broken"]
+            if review_count:
+                status_bits.append(f"{review_count} to review")
+            row.set_status(f"Done — {', '.join(status_bits)}",
+                            theme.GOOD if broken_count == 0 else theme.BAD)
+            if broken_count == 0 and review_count == 0:
                 log(f"  {fname} — No broken links found!", "ok")
             else:
-                row.set_status(f"Done — {broken_count} broken", theme.BAD)
-                log(f"  {fname} — {broken_count} broken links saved to: {os.path.basename(out_path)}", "bad")
+                if broken_count:
+                    log(f"  {fname} — {broken_count} broken links saved to: {os.path.basename(out_path)}", "bad")
+                if review_count:
+                    log(f"  {fname} — {review_count} links need review (rate-limited, needs login, "
+                        f"server error — not confirmed dead) saved to: {os.path.basename(review_path)}", "warn")
             row.set_progress(100)
 
         except Exception as ex:
@@ -249,6 +266,7 @@ def build(page: ft.Page) -> ft.Control:
         running["value"] = True
         run_button.disabled = True
         broken_val.value = "0"
+        review_val.value = "0"
         done_val.value = "0"
         log(f"\n▶ Starting check on {len(valid)} file(s)...\n", "info")
         page.update()
@@ -283,7 +301,13 @@ def build(page: ft.Page) -> ft.Control:
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
     )
 
-    summary_row = ft.Row([files_box, rows_box, broken_box, done_box], spacing=10)
+    summary_row = ft.Row([files_box, rows_box, broken_box, review_box, done_box], spacing=10)
+    summary_caption = ft.Text(
+        "BROKEN = confirmed dead (404, or the site couldn't be reached at all). "
+        "NEEDS REVIEW = an unusual response (rate-limited, needs login, server error) — "
+        "may or may not actually be broken, worth a manual look.",
+        size=10, color=theme.MUTED,
+    )
 
     save_row = ft.Row(
         [
@@ -311,6 +335,7 @@ def build(page: ft.Page) -> ft.Control:
                     padding=ft.Padding(0, 8, 0, 8),
                 ),
                 summary_row,
+                summary_caption,
                 save_row,
                 theme.card_container(log_view, padding=8),
             ],
