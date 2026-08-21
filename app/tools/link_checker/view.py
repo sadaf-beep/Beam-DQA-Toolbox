@@ -134,17 +134,13 @@ def build(page: ft.Page) -> ft.Control:
         refresh_summary()
         check_ready()
 
-    async def add_files_click(e=None):
-        picked = await file_picker.pick_files(
-            allow_multiple=True,
-            allowed_extensions=["csv", "xlsx", "xls"],
-        )
-        if not picked:
+    def on_files_picked(e: ft.FilePickerResultEvent):
+        if not e.files:
             return
         if placeholder in file_list.controls:
             file_list.controls.remove(placeholder)
 
-        for f in picked:
+        for f in e.files:
             path = f.path
             if any(r.path == path for r in rows):
                 continue
@@ -173,17 +169,16 @@ def build(page: ft.Page) -> ft.Control:
         check_ready()
         page.update()
 
-    async def choose_folder_click(e=None):
-        path = await folder_picker.get_directory_path()
-        if path:
-            save_dir["path"] = path
-            save_label.value = path
+    def on_folder_picked(e: ft.FilePickerResultEvent):
+        if e.path:
+            save_dir["path"] = e.path
+            save_label.value = e.path
             save_label.color = theme.INFO
             check_ready()
             page.update()
 
-    file_picker = ft.FilePicker()
-    folder_picker = ft.FilePicker()
+    file_picker = ft.FilePicker(on_result=on_files_picked)
+    folder_picker = ft.FilePicker(on_result=on_folder_picked)
     page.overlay.extend([file_picker, folder_picker])
 
     def clear_all(e=None):
@@ -241,7 +236,7 @@ def build(page: ft.Page) -> ft.Control:
             running["value"] = False
             check_ready()
             log(f"\nAll files complete! Results saved to: {save_dir['path']}\n", "ok")
-            page.show_dialog(ft.SnackBar(ft.Text(f"All {len(valid)} file(s) checked — results in {save_dir['path']}")))
+            page.open(ft.SnackBar(ft.Text(f"All {len(valid)} file(s) checked — results in {save_dir['path']}")))
         page.update()
 
     def run_all(e=None):
@@ -276,7 +271,10 @@ def build(page: ft.Page) -> ft.Control:
                             size=11, color=theme.MUTED),
                     ft.Button(
                         "+ Add Files", icon=ft.Icons.ADD, bgcolor=theme.ACCENT, color="white",
-                        on_click=add_files_click,
+                        on_click=lambda e: file_picker.pick_files(
+                            allow_multiple=True,
+                            allowed_extensions=["csv", "xlsx", "xls"],
+                        ),
                     ),
                 ],
                 spacing=12,
@@ -293,7 +291,7 @@ def build(page: ft.Page) -> ft.Control:
             save_label,
             ft.OutlinedButton(
                 "Choose Folder", icon=ft.Icons.FOLDER_OPEN,
-                on_click=choose_folder_click,
+                on_click=lambda e: folder_picker.get_directory_path(),
             ),
             ft.Container(expand=True),
             ft.OutlinedButton("Clear All", on_click=clear_all),
