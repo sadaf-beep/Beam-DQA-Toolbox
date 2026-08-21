@@ -42,6 +42,8 @@ def check_url(session: requests.Session, url: str, timeout: int = TIMEOUT):
         return ("--", False)
 
     url = url.strip()
+    if url.startswith("data:"):
+        return ("OK (embedded image)", False)
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
 
