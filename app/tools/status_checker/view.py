@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 from datetime import datetime
 
 import anthropic
@@ -9,6 +10,13 @@ import flet as ft
 
 import theme
 from . import core
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def build(page: ft.Page) -> ft.Control:
@@ -140,9 +148,11 @@ def build(page: ft.Page) -> ft.Control:
     confirmed_box, confirmed_val = stat_box("CONFIRMED", theme.GOOD)
     mismatch_box, mismatch_val = stat_box("MISMATCHES", theme.BAD)
     unknown_box, unknown_val = stat_box("UNKNOWN", theme.WARN)
+    review_box, review_val = stat_box("NEEDS REVIEW", theme.WARN)
 
     progress = ft.ProgressBar(value=0, color=theme.ACCENT, bgcolor=theme.BORDER)
     status_text = ft.Text("Ready", size=12, color=theme.MUTED)
+    elapsed_text = ft.Text("", size=12, color=theme.MUTED, font_family=theme.MONO_FONT)
     log_view = ft.ListView(spacing=2, height=160, auto_scroll=True)
 
     run_button = ft.Button("Run Status Check", icon=ft.Icons.PLAY_ARROW,
@@ -175,7 +185,7 @@ def build(page: ft.Page) -> ft.Control:
     open_button.on_click = open_results
 
     # ── Run ─────────────────────────────────────────────────
-    def run_worker():
+    def run_worker(start_time):
         try:
             api_key = cfg.get("claude_api_key")
             if not api_key:
@@ -190,6 +200,12 @@ def build(page: ft.Page) -> ft.Control:
             os.makedirs(out_dir["path"], exist_ok=True)
             out_path = os.path.join(out_dir["path"], "Verified_Results_Claude.xlsx")
 
+            if not recovery and os.path.exists(out_path):
+                log(f"Verified_Results_Claude.xlsx already exists in that folder. Turn on Recovery mode "
+                    "to build on it, or choose a different/empty output folder — running now would "
+                    "overwrite it.", "bad")
+                return
+
             client = anthropic.Anthropic(api_key=api_key)
 
             all_results, skip_keys = [], set()
@@ -200,6 +216,7 @@ def build(page: ft.Page) -> ft.Control:
 
             log(f"Model: {model}", "info")
 
+            stopped_early = False
             total_files = len(file_paths)
             for fi, path in enumerate(file_paths, 1):
                 name = os.path.basename(path)
@@ -215,6 +232,10 @@ def build(page: ft.Page) -> ft.Control:
                         path, client, model, batch_size, batch_pause, skip_keys,
                         on_progress, log, set_status,
                     )
+                except core.FatalAPIError as ex:
+                    log(f"Stopping — {ex}", "bad")
+                    stopped_early = True
+                    break
                 except Exception as ex:
                     log(f"Cannot process {name}: {ex}", "bad")
                     continue
@@ -231,17 +252,37 @@ def build(page: ft.Page) -> ft.Control:
                 confirmed_val.value = str(sum(1 for r in all_results if "Confirmed" in str(r.get("Match", ""))))
                 mismatch_val.value = str(sum(1 for r in all_results if "Mismatch" in str(r.get("Match", ""))))
                 unknown_val.value = str(sum(1 for r in all_results if str(r.get("Verified Status", "")).lower() == "unknown"))
+                review_val.value = str(sum(1 for r in all_results if str(r.get("Verified Status", "")).lower() == core.NEEDS_REVIEW_STATUS))
                 page.update()
 
+            elapsed = time.time() - start_time
+            duration_str = _format_duration(elapsed)
+
             if not all_results:
-                log("No results — check your API key and files.", "bad")
+                log(f"No results — check your API key and files. ({duration_str} elapsed)", "bad")
                 status_text.value = "Failed"
                 page.update()
                 return
 
             core.save_excel(all_results, out_path)
             result_path["path"] = out_path
-            log(f"Done — {len(all_results)} products across {total_files} file(s). Saved to: {out_path}", "ok")
+            review_count = sum(1 for r in all_results if str(r.get("Verified Status", "")).lower() == core.NEEDS_REVIEW_STATUS)
+            avg_str = f"{elapsed / len(all_results):.1f}s/product" if all_results else "n/a"
+
+            if stopped_early:
+                log(f"Stopped early after {duration_str} — {len(all_results)} product(s) saved before the error "
+                    f"({avg_str}). Fix the issue and re-run with Recovery mode on to pick up the rest. "
+                    f"Saved to: {out_path}", "bad")
+                status_text.value = "Stopped"
+                open_button.visible = True
+                page.update()
+                return
+
+            done_msg = f"Done in {duration_str} — {len(all_results)} products across {total_files} file(s) ({avg_str})."
+            if review_count:
+                done_msg += f" {review_count} need human review (API couldn't process them)."
+            done_msg += f" Saved to: {out_path}"
+            log(done_msg, "ok" if not review_count else "warn")
             status_text.value = "Complete"
             progress.value = 1.0
             open_button.visible = True
@@ -264,7 +305,17 @@ def build(page: ft.Page) -> ft.Control:
         log_view.controls.clear()
         log(f"Starting status check on {len(file_paths)} file(s)...", "info")
         page.update()
-        threading.Thread(target=run_worker, daemon=True).start()
+
+        start_time = time.time()
+
+        def tick():
+            while running["value"]:
+                elapsed_text.value = f"Elapsed: {_format_duration(time.time() - start_time)}"
+                page.update()
+                time.sleep(1)
+
+        threading.Thread(target=tick, daemon=True).start()
+        threading.Thread(target=run_worker, args=(start_time,), daemon=True).start()
 
     run_button.on_click = run_all
 
@@ -313,8 +364,8 @@ def build(page: ft.Page) -> ft.Control:
         spacing=10,
     )
 
-    run_row = ft.Row([run_button, open_button, status_text], spacing=12)
-    stats_row = ft.Row([checked_box, confirmed_box, mismatch_box, unknown_box], spacing=10)
+    run_row = ft.Row([run_button, open_button, status_text, elapsed_text], spacing=12)
+    stats_row = ft.Row([checked_box, confirmed_box, mismatch_box, unknown_box, review_box], spacing=10)
 
     return ft.Container(
         content=ft.Column(
