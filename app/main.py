@@ -4,6 +4,7 @@ import flet as ft
 
 from tools.base import Tool
 from tools.link_checker import view as link_checker_view
+from tools.status_checker import view as status_checker_view
 import theme
 
 TOOLS = [
@@ -13,6 +14,13 @@ TOOLS = [
         description="Scan CSV/Excel files for broken image and product links.",
         icon=ft.Icons.LINK,
         build=link_checker_view.build,
+    ),
+    Tool(
+        key="status_checker",
+        name="Status Checker",
+        description="Verify product lifecycle status (supported/discontinued) via the Claude API.",
+        icon=ft.Icons.FACT_CHECK,
+        build=status_checker_view.build,
     ),
 ]
 
