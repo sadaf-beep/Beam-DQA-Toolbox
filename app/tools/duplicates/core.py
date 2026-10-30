@@ -32,8 +32,12 @@ DEFAULT_THRESHOLD = 0.85
 LIKELY_SCORE = 0.92
 
 EXACT, CROSS, NEAR = "Exact Duplicate", "Cross-Brand", "Near Match"
+# Same manufacturer, model differs only by hyphens/spaces/dots. The DQA team
+# treats these as the same model but checks case by case — they're often a
+# model alias rather than a true duplicate — so they go to review.
+VARIANT = "Model Variant (Review)"
 # Most severe first — a row in several pairs reports the worst type.
-SEVERITY = [EXACT, CROSS, NEAR]
+SEVERITY = [EXACT, CROSS, VARIANT, NEAR]
 
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
@@ -94,24 +98,28 @@ def find_pairs(df, threshold: float = DEFAULT_THRESHOLD, progress=None, stop=Non
     `stop` event is set, the near-match scan ends early and the pairs found
     so far are returned (exact/cross-brand pairs are always complete)."""
     cols = Columns(df)
-    rows = []  # (row id, norm mfr, norm model)
+    rows = []  # (row id, norm mfr, norm model, model as written)
     for _, row in df.iterrows():
         p = cols.product(row)
         nmod = normalise(p["model"])
         if nmod:
-            rows.append((row[ROW_COL], normalise(p["mfr"]), nmod))
+            rows.append((row[ROW_COL], normalise(p["mfr"]), nmod, p["model"]))
 
     pairs = []
     by_model = {}
-    for rid, nm, nmod in rows:
-        by_model.setdefault(nmod, []).append((rid, nm))
+    for rid, nm, nmod, raw in rows:
+        by_model.setdefault(nmod, []).append((rid, nm, raw))
 
-    # Exact / cross-brand: every pair of rows sharing a normalised model.
+    # Exact / variant / cross-brand: every pair of rows sharing a normalised model.
     for members in by_model.values():
         for a in range(len(members)):
             for b in range(a + 1, len(members)):
-                (r1, m1), (r2, m2) = sorted((members[a], members[b]))
-                if m1 == m2:
+                (r1, m1, raw1), (r2, m2, raw2) = sorted((members[a], members[b]))
+                if m1 == m2 and raw1.strip().lower() != raw2.strip().lower():
+                    pairs.append(_pair(r1, r2, VARIANT, "Review", 1.0,
+                                       f"Same model apart from formatting ({raw1} vs {raw2}). "
+                                       "May be a model alias rather than a duplicate — check case by case."))
+                elif m1 == m2:
                     pairs.append(_pair(r1, r2, EXACT, "Definite", 1.0,
                                        "Identical manufacturer and model number."))
                 else:
@@ -218,6 +226,7 @@ def summarize(results: dict, pairs: list = None) -> list:
         ("Pairs by type:", "", None),
         ("  Exact Duplicates", by("type", EXACT), excel.BAD),
         ("  Cross-Brand", by("type", CROSS), excel.WARN),
+        ("  Model Variants (formatting only — check for alias)", by("type", VARIANT), excel.WARN),
         ("  Near Matches", by("type", NEAR), excel.WARN),
         ("", "", None),
         ("Pairs by confidence:", "", None),

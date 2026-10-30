@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from openpyxl import Workbook
 
-from tools.common import excel
+from tools.common import excel, oem_reference
 from tools.common.data import REF_COLS, ROW_COL, SOURCE_COL, Columns, clean, find_col
 
 NAME = "OEM URL Check"
@@ -217,7 +217,15 @@ def mfr_domains(mfr: str) -> set:
         if re.search(r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])", name) \
                 or re.sub(r"[^a-z0-9]", "", key) == compact:
             found |= domains
+    ref = oem_reference.lookup(mfr)
+    if ref and ref["website_domain"]:
+        found.add(registrable_domain(ref["website_domain"]))
     return found
+
+
+def _all_oem_domains() -> set:
+    """Built-in OEM domains plus the team's OEM-TOP-100 websites."""
+    return ALL_OEM_DOMAINS | {registrable_domain(d) for d in oem_reference.official_domains().values()}
 
 
 def check_record(mfr: str, product_url: str, flag) -> dict:
@@ -251,17 +259,54 @@ def check_record(mfr: str, product_url: str, flag) -> dict:
             return res("Pass", own, "OEM", f"Correctly identified as OEM ({own})")
         return res("Fail", own, "OEM", f"URL is manufacturer domain ({own}) but is_oem_url is marked FALSE")
 
-    other = host_matches(host, ALL_OEM_DOMAINS)
+    # DQA rule: is_oem_url is TRUE only on the product's own manufacturer's
+    # site. A third-party page (used because the manufacturer doesn't list
+    # the product) is fine and is not a QA error when marked FALSE.
+    other = host_matches(host, _all_oem_domains())
     if other:
-        if flag is False:
+        if flag:
             return res("Fail", other, "OEM (different mfr)",
-                       f"URL appears to be an OEM domain ({other}) but is_oem_url is marked FALSE")
+                       f"URL is another manufacturer's site ({other}), not {mfr}'s, but is_oem_url is TRUE")
         return res("Review", other, "OEM (different mfr)",
-                   f"URL appears to be an OEM domain ({other}) but doesn't match the recorded "
-                   f"manufacturer '{mfr}' — verify" + (no_flag if flag is None else ""))
+                   f"Page is on another manufacturer's site ({other}) — is_oem_url FALSE is right, "
+                   f"but check the recorded manufacturer '{mfr}' is correct")
 
-    return res("Review", domain, "Unknown",
-               f"Domain '{domain}' is not in the known manufacturer or retailer lists — manual check needed")
+    if _looks_like_mfr_site(domain, mfr):
+        if flag is None:
+            return res("Pass", domain, "OEM (by name)",
+                       f"Domain {domain} looks like {mfr}'s own site{no_flag}")
+        if flag:
+            return res("Pass", domain, "OEM (by name)", f"Domain {domain} looks like {mfr}'s own site")
+        return res("Fail", domain, "OEM (by name)",
+                   f"Domain {domain} looks like {mfr}'s own site but is_oem_url is marked FALSE")
+
+    if flag:
+        return res("Review", domain, "Third party",
+                   f"is_oem_url is TRUE but {domain} doesn't look like {mfr}'s site — verify")
+    return res("Pass", domain, "Third party",
+               f"Third-party page ({domain}) — fine when the manufacturer doesn't list the product")
+
+
+# Words too generic to identify a manufacturer from a domain name.
+_GENERIC_WORDS = {"the", "inc", "llc", "ltd", "corp", "co", "ag", "gmbh", "group", "company",
+                  "systems", "system", "video", "audio", "pro", "digital", "design", "designs",
+                  "technologies", "technology", "tech", "communications", "electronics",
+                  "international", "media", "products", "solutions", "networks", "com"}
+
+
+def _looks_like_mfr_site(domain: str, mfr: str) -> bool:
+    """For domains not in MFR_DOMAINS: does the domain name itself carry the
+    manufacturer's name (fs.com for FS.COM, thorbroadcast.com for Thor
+    Fiber)? A best guess that keeps unknown domains out of manual review."""
+    label = re.sub(r"[^a-z0-9]", "", domain.split(".")[0].lower())
+    mfr_l = clean(mfr).lower()
+    mfr_key = re.sub(r"[^a-z0-9]", "", mfr_l)
+    if len(label) < 2 or not mfr_key:
+        return False
+    if label in mfr_key or mfr_key in label:
+        return True
+    words = [w for w in re.split(r"[^a-z0-9]+", mfr_l) if len(w) >= 3 and w not in _GENERIC_WORDS]
+    return any(w in label for w in words)
 
 
 def _flag(val):

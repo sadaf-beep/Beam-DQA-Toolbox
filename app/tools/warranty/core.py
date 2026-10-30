@@ -10,7 +10,7 @@ tools/product_name_qa/core.py.
 
 from openpyxl import Workbook
 
-from tools.common import claude, excel
+from tools.common import claude, excel, oem_reference
 from tools.common.data import REF_COLS, ROW_COL, SOURCE_COL, Columns, clean, find_col
 
 NAME = "Warranty Validation"
@@ -37,9 +37,13 @@ Search to verify whether this specific product actually qualifies for a lifetime
 STEP 2 — ALL OTHER VALUES:
 First search for a PRODUCT-SPECIFIC warranty for this exact model.
 If found → convert to days and compare with recorded value (±15 day tolerance).
-If not found → search for the MANUFACTURER STANDARD WARRANTY (general warranty policy).
-If standard found → use as fallback, note it is not product-specific.
-If neither found → status: Unknown.
+If not found → use the MANUFACTURER STANDARD WARRANTY. The DQA team's rule is
+that a product with no warranty of its own gets the manufacturer's standard
+warranty, so a recorded value matching the standard is correct → Pass (say in
+the note that it is the manufacturer standard). When the input has
+mfr_standard_warranty, that is the team's reference value — use it; otherwise
+search the manufacturer's general warranty policy.
+If neither a product-specific nor a standard warranty can be found → status: Unknown.
 
 WARRANTY CONVERSION TABLE (use exactly):
   "1 year"           = 365 days
@@ -59,8 +63,7 @@ STATUS VALUES (use exactly one):
 - Pass             → recorded warranty matches verified warranty (within ±15 days)
 - Pass (Lifetime)  → warranty_length = 36500 AND product confirmed as lifetime warranty
 - Fail             → recorded warranty does not match verified (beyond ±15 day tolerance)
-- Warning          → could not find product-specific warranty, using standard MFR fallback
-                     OR result is uncertain — human review recommended
+- Warning          → result is uncertain (e.g. conflicting sources) — human review recommended
 - Unknown          → no warranty information found from any source
 - Error            → warranty_length is blank, null, zero, or clearly invalid
 
@@ -108,6 +111,17 @@ def missing_columns(df) -> list:
 # DQA team), so -1 is checked exactly like 36500.
 LIFETIME_ALIASES = {"-1", str(LIFETIME_DAYS)}
 
+BLANK_STATUS = "Flag — blank warranty"
+
+
+def _standard_hint(mfr: str, standard) -> str:
+    if standard and standard["warranty_days"]:
+        return (f"Suggested: {mfr}'s standard warranty, {standard['standard_warranty']} "
+                f"({standard['warranty_days']} days).")
+    if standard and standard["standard_warranty"]:
+        return f"Team reference for {mfr}: {standard['standard_warranty']}."
+    return f"Suggested: add {mfr or 'the manufacturer'}'s standard warranty."
+
 
 def _valid_days(value: str) -> bool:
     """A usable warranty is a positive number of days — blank, zero and
@@ -140,10 +154,18 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
         days = clean(row.get(w_col))
         if days in LIFETIME_ALIASES:
             days = str(LIFETIME_DAYS)
-        if not _valid_days(days):
+        standard = oem_reference.lookup(rec["mfr"])
+        if days in ("", "0"):
+            # DQA rule: an identified product's warranty is never blank — it
+            # gets the manufacturer's standard warranty when it has none.
             results[row[ROW_COL]] = _result(
-                "Error", f"warranty_length is blank, zero or not a number ({days or 'blank'}).")
+                BLANK_STATUS, "Warranty is blank. " + _standard_hint(rec["mfr"], standard))
             continue
+        if not _valid_days(days):
+            results[row[ROW_COL]] = _result("Error", f"warranty_length is not a number ({days}).")
+            continue
+        if standard and standard["warranty_days"]:
+            rec["mfr_standard_warranty"] = f"{standard['standard_warranty']} ({standard['warranty_days']} days)"
         if not rec["model"] and not rec["product_name"]:
             results[row[ROW_COL]] = _result("Skip", "No model number or product name — nothing to search for.")
             continue
@@ -176,9 +198,10 @@ def summarize(results: dict) -> list:
         ("Pass — warranty correct", _count(results, "pass") + _count(results, "pass (lifetime)"), excel.GOOD),
         ("  of which: Lifetime verified", _count(results, "pass (lifetime)"), excel.GOOD),
         ("Fail — warranty mismatch", _count(results, "fail"), excel.BAD),
-        ("Warning — using MFR standard / uncertain", _count(results, "warning"), excel.WARN),
+        ("Blank warranty — add the manufacturer standard", _count(results, BLANK_STATUS), excel.WARN),
+        ("Warning — uncertain, needs a look", _count(results, "warning"), excel.WARN),
         ("Unknown — no data found", _count(results, "unknown"), excel.INFO),
-        ("Error — invalid warranty value", _count(results, "error"), excel.REVIEW),
+        ("Error — warranty is not a number", _count(results, "error"), excel.REVIEW),
         ("Skipped — nothing to search for", _count(results, "skip"), excel.INFO),
         ("Needs human review (API couldn't process)", _count(results, claude.NEEDS_REVIEW), excel.REVIEW),
     ]

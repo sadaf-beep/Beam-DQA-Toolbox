@@ -88,7 +88,9 @@ KEY RULES:
   supporting it directly (updates/service) — a newer model existing doesn't discontinue the old
   one by itself; it only does if support for the old one has also actually ended.
 - Acquired manufacturer: check if acquiring company explicitly continues support
-- Never guess — if inconclusive after both tiers, return unknown
+- Never guess — if inconclusive after both tiers, return unknown. Unknown is a last resort
+  (the DQA team no longer uses it otherwise): only when there is genuinely no way to tell
+  whether the product is supported or discontinued.
 - NEVER omit a product from the output. Every product you were given must appear exactly once,
   even one you could only search by name, or one you couldn't verify at all — in that last case
   return Verified Status: unknown with a Reason explaining what was missing/inconclusive.
