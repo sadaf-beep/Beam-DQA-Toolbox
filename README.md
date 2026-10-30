@@ -4,9 +4,12 @@ Beam Dynamics' product data QA suite — a desktop app for checking product
 feeds (CSV/Excel). Every tool can run on its own, or all together:
 
 - **Full QA Pipeline** — runs any selection of the checks below on all your
-  files at once and writes one `Master_QA_Report_<timestamp>.xlsx`, one row
-  per product, sorted by concern level (High / Medium / Low / Pass). Checks
-  skip themselves when the files don't have their columns.
+  files at once and writes one `Master_QA_Report_<timestamp>.xlsx`. Its
+  first sheet is a short **To-Do** list: only products with a problem, one
+  line per problem, with priority (High / Medium / Low), the rule it breaks
+  and a suggested fix, following the team's *DQA Product QA Rulebook*
+  (Google Doc). Full detail for every product is in the "All Products"
+  sheet. Checks skip themselves when the files don't have their columns.
 - **Duplicate Detection** — exact, cross-brand and near-match duplicates. Free.
 - **OEM URL Check** — is `Page URL` the manufacturer's site or a
   retailer, and does `is_oem_url` say the same? Free.
