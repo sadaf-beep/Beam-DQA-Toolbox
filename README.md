@@ -1,11 +1,32 @@
 # Toolbox
 
-A small desktop app suite. Ships two tools:
+Beam Dynamics' product data QA suite — a desktop app for checking product
+feeds (CSV/Excel). Every tool can run on its own, or all together:
 
-- **Link Checker** — scans CSV/Excel product feeds for broken image and
-  product page links, and saves a CSV of just the broken rows for each file.
-- **Status Checker** — verifies whether products in a CSV are still
-  supported or discontinued, using the Claude API with web search.
+- **Full QA Pipeline** — runs any selection of the checks below on all your
+  files at once and writes one `Master_QA_Report_<timestamp>.xlsx`, one row
+  per product, sorted by concern level (High / Medium / Low / Pass). Checks
+  skip themselves when the files don't have their columns.
+- **Duplicate Detection** — exact, cross-brand and near-match duplicates. Free.
+- **OEM URL Check** — is `product_url` the manufacturer's site or a
+  retailer, and does `is_oem_url` say the same? Free.
+- **Link Checker** — broken image and product page links. Free.
+- **Status Checker** — are products still supported or discontinued?
+  (Claude + web search)
+- **Product Name QA** — do manufacturer, model and product name agree?
+  (Claude, no web search — cheap)
+- **Firmware & Docs** — are the `has_firmware`, `Firmware Added` and
+  `documents added` flags right? (Claude + web search)
+- **Warranty Validation** — is `warranty_length` right? `36500` means
+  lifetime. (Claude + web search)
+- **Dimensions Validation** — are `product_dimension` /
+  `package_dimensions` consistent and accurate? (Claude + web search)
+- **File Splitter** — split a large file into smaller CSVs.
+
+The Claude tools share one saved API key and let you pick Claude Haiku 5.5
+(default, cheapest) or Claude Sonnet 5.5 (more thorough). A batch the API
+can't process is never retried — those products are marked **Needs Review**
+in the report instead, so a hiccup never costs more than one call.
 
 ## First-time setup (Windows)
 
@@ -18,7 +39,7 @@ A small desktop app suite. Ships two tools:
    ```
    This installs everything the app needs (Flet for the UI, pandas/openpyxl
    for reading spreadsheets, requests for checking links, anthropic for the
-   Status Checker).
+   Claude-powered checks).
 
 ## Running the app
 
@@ -55,8 +76,8 @@ A window opens with a "Toolbox" home screen.
 
    **Cost:** each batch call is billed for model tokens plus $10 per 1,000
    web searches (the bigger cost driver, since search-result content also
-   counts as input tokens). The tool defaults to Claude Haiku 4.5, the
-   cheapest of the two models offered — Sonnet 4.6 is the other option, for
+   counts as input tokens). The tool defaults to Claude Haiku 5.5, the
+   cheapest of the two models offered — Sonnet 5.5 is the other option, for
    more thorough (but pricier) checks. Test on a small batch first to get a
    feel for real cost before running it on a large file.
 
@@ -79,13 +100,21 @@ app/
   theme.py                  — shared colors/styling
   tools/
     base.py                 — Tool interface every tool implements
-    link_checker/
-      core.py               — link-checking logic (no UI code, testable on its own)
-      view.py                — the Link Checker's Flet screen
-    status_checker/
-      core.py               — Claude API verification logic (no UI code, testable on its own)
-      view.py                — the Status Checker's Flet screen
+    common/
+      data.py               — loading files, finding columns by name
+      claude.py             — shared API key, models, Claude batch runner
+      excel.py              — formatted report sheets
+      ui.py                 — the shared tool screen (files, settings, run, log)
+    qa_pipeline/            — Full QA Pipeline + Master QA Report
+    <tool>/                 — one folder per tool (duplicates, oem_url,
+      core.py                 link_checker, status_checker, product_name_qa,
+      view.py                 firmware_docs, warranty, dimensions, file_splitter)
 ```
+
+Each tool's `core.py` is the checking logic with no UI code, so it can be
+tested and reused on its own; `view.py` is its screen. QA tools' engines all
+expose the same functions (`missing_columns`, `run`, `summarize`,
+`save_excel`) — that's what lets the pipeline run them in sequence.
 
 To add another tool later: create `app/tools/<name>/view.py` with a
 `build(page)` function, then register a

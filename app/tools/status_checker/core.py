@@ -7,8 +7,6 @@ the Flet view so the verification logic can be tested and reused on its own.
 """
 
 import json
-import os
-import re
 import time
 from pathlib import Path
 
@@ -18,32 +16,24 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-# Haiku only vs. Sonnet — Opus is left out on purpose, it's not worth the
-# extra cost for this kind of lookup/classification task.
-MODELS = {
-    "Claude Haiku 4.5 (cheapest)": "claude-haiku-4-5-20251001",
-    "Claude Sonnet 4.6 (more thorough)": "claude-sonnet-4-6",
-}
-DEFAULT_MODEL_LABEL = "Claude Haiku 4.5 (cheapest)"
+from tools.common import claude, excel
+from tools.common.data import ROW_COL, Columns, find_col
 
-CONFIG_DIR = Path(os.getenv("APPDATA", Path.home())) / "Toolbox" / "StatusChecker"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+NAME = "Status Check"
+
+# Model choices, the saved API key and fatal-error handling are shared
+# with the other AI tools.
+MODELS = claude.MODELS
+DEFAULT_MODEL_LABEL = claude.DEFAULT_MODEL_LABEL
+load_cfg = claude.load_cfg
+save_cfg = claude.save_cfg
+FatalAPIError = claude.FatalAPIError
 
 REQUIRED_COLS = ["mfr", "product_status"]
 BASE_COLS = ["mfr", "model", "product name", "product_status"]
 URL_COL = "product_url"
 
 NEEDS_REVIEW_STATUS = "could not check"
-
-# Status codes where every remaining call is guaranteed to fail the same
-# way (bad/expired key, no access, wrong model id) — not worth flagging one
-# batch at a time, the whole run should stop with one clear message.
-FATAL_STATUS_CODES = {400, 401, 403, 404}
-
-
-class FatalAPIError(Exception):
-    """Raised instead of returning needs-review placeholders when the error
-    means the run itself can't succeed, not just this one batch."""
 
 SYSTEM_PROMPT = """
 You are a product lifecycle status verification agent for a professional broadcast equipment database.
@@ -112,6 +102,7 @@ No markdown, no backticks, no text before or after the JSON array.
 Each object must have EXACTLY these keys:
 [
   {
+    "_id": "exact value from input, if the input has one",
     "Manufacturer": "exact value from input",
     "Model": "exact value from input (empty string if none was given)",
     "Product Name": "exact value from input",
@@ -127,18 +118,6 @@ Each object must have EXACTLY these keys:
 NAV = "#0D1B2A"
 
 
-def load_cfg() -> dict:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if CONFIG_FILE.exists():
-        return json.loads(CONFIG_FILE.read_text())
-    return {}
-
-
-def save_cfg(data: dict) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(data, indent=2))
-
-
 def load_df(path: str) -> pd.DataFrame:
     """Load a product CSV, trying multiple encodings."""
     for enc in ["utf-8", "latin-1", "cp1252", "iso-8859-1"]:
@@ -147,25 +126,6 @@ def load_df(path: str) -> pd.DataFrame:
         except UnicodeDecodeError:
             continue
     raise ValueError("Could not read file — check its encoding")
-
-
-def parse_response(response) -> str:
-    """Extract text from Claude response content blocks."""
-    text = ""
-    for block in response.content:
-        if hasattr(block, "text"):
-            text += block.text
-    return text
-
-
-def extract_json(raw: str):
-    """Robustly extract a JSON array from Claude's response."""
-    raw = raw.strip().replace("```json", "").replace("```", "").strip()
-    raw = re.sub(r"\[\d+(?:,\s*\d+)*\]", "", raw)
-    s, e = raw.find("["), raw.rfind("]")
-    if s == -1 or e == -1:
-        raise ValueError("No JSON array found in response")
-    return json.loads(raw[s:e + 1])
 
 
 def _hex_fill(h):
@@ -352,18 +312,11 @@ def verify_batch(client: anthropic.Anthropic, model: str, batch_records: list,
     prompt = f"Verify the status of these products:\n{json.dumps(batch_records, indent=2)}"
 
     try:
-        resp = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return _ensure_mismatch_reason(extract_json(parse_response(resp)))
+        return _ensure_mismatch_reason(claude.ask_json(client, model, SYSTEM_PROMPT, prompt, use_search=True))
 
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError) as e:
         log_callback("Malformed response from the model — flagging batch for human review", "warn")
-        return _needs_review(batch_records, "Model returned an unparseable response")
+        return _needs_review(batch_records, f"Unusable model response: {str(e)[:80]}")
 
     except anthropic.RateLimitError:
         log_callback("Rate limited — flagging batch for human review", "warn")
@@ -373,7 +326,7 @@ def verify_batch(client: anthropic.Anthropic, model: str, batch_records: list,
         if e.status_code == 529:
             log_callback("API overloaded (529) — flagging batch for human review", "warn")
             return _needs_review(batch_records, "API was overloaded (529)")
-        if e.status_code in FATAL_STATUS_CODES:
+        if e.status_code in claude.FATAL_STATUS_CODES:
             raise FatalAPIError(f"API error {e.status_code} — check your API key and model selection") from e
         log_callback(f"API error ({e.status_code}) — flagging batch for human review", "bad")
         return _needs_review(batch_records, f"API error ({e.status_code})")
@@ -501,3 +454,82 @@ def check_file(path: str, client: anthropic.Anthropic, model: str, batch_size: i
         log_callback(f"{lost} products lost to API errors — re-run with recovery mode on to pick them up", "warn")
 
     return file_results, total, skipped
+
+
+# ── Pipeline entry point ────────────────────────────────────
+# Same engine contract as the other QA tools (see product_name_qa/core.py),
+# used by the Full QA Pipeline on its combined DataFrame. The standalone
+# screen keeps using check_file() for its per-file + recovery workflow.
+
+def missing_columns(df) -> list:
+    cols = Columns(df)
+    missing = [] if cols.mfr else ["mfr"]
+    if find_col(df, "product_status", "status") is None:
+        missing.append("product_status")
+    return missing
+
+
+def _pipeline_result(r: dict) -> dict:
+    verified = str(r.get("Verified Status", "")).strip().lower()
+    match = str(r.get("Match", "")).strip()
+    if verified == NEEDS_REVIEW_STATUS or match == "Needs Review":
+        r["qa_status"] = claude.NEEDS_REVIEW
+    elif match.lower() == "mismatch":
+        r["qa_status"] = "Mismatch"
+    elif verified == "unknown":
+        r["qa_status"] = "Unknown"
+    else:
+        r["qa_status"] = "Confirmed"
+    r["qa_note"] = str(r.get("Reason", "")).strip()
+    return r
+
+
+def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None) -> dict:
+    cols = Columns(df)
+    status_col = find_col(df, "product_status", "status")
+    results, records = {}, []
+    for _, row in df.iterrows():
+        p = cols.product(row)
+        db_status = _clean(row.get(status_col))
+        base = {"Manufacturer": p["mfr"], "Model": p["model"], "Product Name": p["product_name"],
+                "DB Status": db_status, "Suggested Status": ""}
+        if not db_status:
+            results[row[ROW_COL]] = {**base, "Verified Status": "", "Match": "",
+                                     "qa_status": "Skip", "qa_note": "No product_status recorded"}
+            continue
+        if not p["model"] and not p["product_name"]:
+            results[row[ROW_COL]] = _pipeline_result({
+                **base, "Verified Status": NEEDS_REVIEW_STATUS, "Match": "Needs Review",
+                "Reason": "No model number or product name given — nothing to search for"})
+            continue
+        rec = {"mfr": p["mfr"], "model": p["model"], "product name": p["product_name"],
+               "product_status": db_status, "_row": row[ROW_COL]}
+        if cols.url:
+            rec[URL_COL] = _clean(row.get(cols.url))
+        records.append(rec)
+
+    log(f"{len(records)} product(s) to verify", "dim")
+    answered = claude.run_batches(
+        client, model, records, SYSTEM_PROMPT, use_search=True,
+        batch_size=batch_size, batch_pause=batch_pause, log=log,
+        progress=progress, status=status, label=NAME,
+        review_result=lambda rec, why: _needs_review([rec], why)[0],
+    )
+    for row, r in answered.items():
+        results[row] = _pipeline_result(_ensure_mismatch_reason([r])[0])
+    return results
+
+
+def summarize(results: dict) -> list:
+    values = list(results.values())
+
+    def count(s):
+        return sum(1 for r in values if r["qa_status"] == s)
+
+    return [
+        ("Total products checked", len(values), None),
+        ("Confirmed correct", count("Confirmed"), excel.GOOD),
+        ("Mismatches found", count("Mismatch"), excel.WARN),
+        ("Unable to verify", count("Unknown"), excel.INFO),
+        ("Needs human review (API couldn't process)", count(claude.NEEDS_REVIEW), excel.REVIEW),
+    ]

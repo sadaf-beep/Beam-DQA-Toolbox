@@ -13,6 +13,8 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 
+from tools.common.data import ROW_COL, Columns, clean
+
 IMAGE_COL = "Image Url"
 PRODUCT_COL = "product_url"
 WORKERS = 20
@@ -201,3 +203,64 @@ def check_file(path: str, session: requests.Session, executor: ThreadPoolExecuto
     total_broken = int(broken_mask.sum())
     total_review = int(review_mask.sum())
     return broken_df, review_df, total, total_broken, total_review
+
+
+# ── Pipeline entry point ────────────────────────────────────
+# Same engine contract as the other QA tools (see product_name_qa/core.py),
+# used by the Full QA Pipeline on its combined DataFrame.
+
+NAME = "Link Check"
+
+
+def missing_columns(df) -> list:
+    cols = Columns(df)
+    if cols.image is None and cols.url is None:
+        return ["Image Url or product_url"]
+    return []
+
+
+def run(df, log, progress=None) -> dict:
+    cols = Columns(df)
+    rows = list(df[ROW_COL])
+    img = {r: "" for r in rows}
+    prod = {r: "" for r in rows}
+
+    tasks = []
+    for _, row in df.iterrows():
+        if cols.image:
+            tasks.append((row[ROW_COL], "image", clean(row.get(cols.image))))
+        if cols.url:
+            tasks.append((row[ROW_COL], "product", clean(row.get(cols.url))))
+
+    session, executor = new_session(), new_executor()
+    try:
+        futures = {executor.submit(check_url, session, t[2]): t for t in tasks}
+        for done, fut in enumerate(as_completed(futures), 1):
+            row, kind, _ = futures[fut]
+            label, _broken = fut.result()
+            (img if kind == "image" else prod)[row] = label
+            if progress and (done % 25 == 0 or done == len(tasks)):
+                progress(done, len(tasks))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+        session.close()
+
+    results = {}
+    for r in rows:
+        parts = [f"{name}: {res}" for name, res in (("Image", img[r]), ("Product URL", prod[r]))
+                 if "BROKEN" in res or "REVIEW" in res]
+        labels = img[r] + prod[r]
+        if "BROKEN" in labels:
+            status = "Broken"
+        elif "REVIEW" in labels:
+            status = "Review"
+        elif not img[r].strip("-") and not prod[r].strip("-"):
+            status = "Skip"
+            parts = ["No image or product URL"]
+        else:
+            status = "Pass"
+        results[r] = {"image_status": img[r], "product_status": prod[r],
+                      "qa_status": status, "qa_note": " | ".join(parts)}
+    broken = sum(1 for v in results.values() if v["qa_status"] == "Broken")
+    log(f"{broken} product(s) with broken links", "bad" if broken else "ok")
+    return results

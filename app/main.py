@@ -9,6 +9,27 @@ import theme
 
 TOOLS = [
     Tool(
+        key="qa_pipeline",
+        name="Full QA Pipeline",
+        description="Run every QA check on product files and get one Master QA Report ranked by concern.",
+        icon=ft.Icons.PLAYLIST_ADD_CHECK,
+        view_module="tools.qa_pipeline.view",
+    ),
+    Tool(
+        key="duplicates",
+        name="Duplicate Detection",
+        description="Find exact, cross-brand and near-match duplicate products. No API needed.",
+        icon=ft.Icons.CONTENT_COPY,
+        view_module="tools.duplicates.view",
+    ),
+    Tool(
+        key="oem_url",
+        name="OEM URL Check",
+        description="Check product_url domains against the is_oem_url flag. No API needed.",
+        icon=ft.Icons.DOMAIN_VERIFICATION,
+        view_module="tools.oem_url.view",
+    ),
+    Tool(
         key="link_checker",
         name="Link Checker",
         description="Scan CSV/Excel files for broken image and product links.",
@@ -21,6 +42,41 @@ TOOLS = [
         description="Verify product lifecycle status (supported/discontinued) via the Claude API.",
         icon=ft.Icons.FACT_CHECK,
         view_module="tools.status_checker.view",
+    ),
+    Tool(
+        key="product_name_qa",
+        name="Product Name QA",
+        description="Check manufacturer, model and product name are consistent (Claude, no web search).",
+        icon=ft.Icons.SPELLCHECK,
+        view_module="tools.product_name_qa.view",
+    ),
+    Tool(
+        key="firmware_docs",
+        name="Firmware & Docs",
+        description="Verify firmware and documentation flags against the manufacturer's site (Claude).",
+        icon=ft.Icons.SYSTEM_UPDATE_ALT,
+        view_module="tools.firmware_docs.view",
+    ),
+    Tool(
+        key="warranty",
+        name="Warranty Validation",
+        description="Verify warranty_length against the manufacturer's stated warranty (Claude).",
+        icon=ft.Icons.VERIFIED_USER,
+        view_module="tools.warranty.view",
+    ),
+    Tool(
+        key="dimensions",
+        name="Dimensions Validation",
+        description="Check product and package dimensions for unit consistency and accuracy (Claude).",
+        icon=ft.Icons.STRAIGHTEN,
+        view_module="tools.dimensions.view",
+    ),
+    Tool(
+        key="file_splitter",
+        name="File Splitter",
+        description="Split a large CSV/Excel file into smaller CSVs.",
+        icon=ft.Icons.CALL_SPLIT,
+        view_module="tools.file_splitter.view",
     ),
 ]
 
