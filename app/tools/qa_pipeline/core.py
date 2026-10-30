@@ -15,6 +15,7 @@ from openpyxl import Workbook
 
 from tools.common import claude, excel
 from tools.common.data import ROW_COL, SOURCE_COL, Columns
+from . import todo
 
 
 @dataclass
@@ -116,7 +117,7 @@ def run_pipeline(df, stage_keys, *, client=None, model="", batch_size=5, batch_p
             continue
 
         stage_results[stage.key] = res
-        issues = sum(1 for r in res.values() if concern(r.get("qa_status")) != "Pass")
+        issues = sum(1 for r in res.values() if todo.items_for(stage.key, r))
         stage_notes[stage.key] = f"{issues} issue(s)"
         log(f"{stage.label}: {issues} product(s) flagged", "warn" if issues else "ok")
         stage_progress(1, 1)
@@ -125,39 +126,70 @@ def run_pipeline(df, stage_keys, *, client=None, model="", batch_size=5, batch_p
 
 
 def build_master_rows(df, stage_results) -> list:
-    """One merged row per product, sorted by concern level."""
+    """One merged row per product with every check's status and note,
+    sorted by concern level. A product's concern level is its highest
+    to-do priority, so the To-Do and All Products sheets always agree.
+    Each row keeps its "_row" id (not written to the sheet)."""
     cols = Columns(df)
     file_row = df.groupby(SOURCE_COL).cumcount() + 1
     rows = []
     for idx, row in df.iterrows():
         rn = row[ROW_COL]
         p = cols.product(row)
-        merged = {"Manufacturer": p["mfr"], "Model": p["model"], "Product Name": p["product_name"],
-                  "Source File": row.get(SOURCE_COL, ""), "File Row": int(file_row[idx]),
-                  **cols.refs(row)}
-        levels, summary = [], []
+        merged = {"_row": rn, "Manufacturer": p["mfr"], "Model": p["model"],
+                  "Product Name": p["product_name"], "Source File": row.get(SOURCE_COL, ""),
+                  "File Row": int(file_row[idx]), **cols.refs(row)}
+        levels, problems = [], []
         for stage in STAGES:
             if stage.key not in stage_results:
                 continue
             r = stage_results[stage.key].get(rn, {})
-            st, note = r.get("qa_status", ""), r.get("qa_note", "")
-            merged[stage.label] = st
-            merged[f"{stage.label} Note"] = note
-            lvl = concern(st)
-            levels.append(lvl)
-            if lvl != "Pass":
-                summary.append(f"{stage.label}: {st}")
-        merged["Concern Level"] = next((c for c in CONCERN_ORDER if c in levels), "Pass")
-        merged["Concern Summary"] = " | ".join(summary) or "No issues found"
+            merged[stage.label] = r.get("qa_status", "")
+            merged[f"{stage.label} Note"] = r.get("qa_note", "")
+            for priority, problem, _rule, _fix in todo.items_for(stage.key, r):
+                levels.append(priority)
+                problems.append(problem)
+        merged["Concern Level"] = next((c for c in todo.PRIORITY_ORDER if c in levels), "Pass")
+        merged["Concern Summary"] = " | ".join(problems) or "No issues found"
         rows.append(merged)
     rows.sort(key=lambda r: CONCERN_ORDER.index(r["Concern Level"]))
     return rows
 
 
 def save_master_report(df, stage_results, stage_notes, path: str) -> list:
-    """Write the Master QA Report; returns the master rows."""
+    """Write the Master QA Report — To-Do list first, then every product in
+    detail — and return the master rows."""
     master = build_master_rows(df, stage_results)
     ran = [s for s in STAGES if s.key in stage_results]
+    todo_rows = todo.build_rows(master, stage_results, ran)
+    priority_rules = [("high", excel.BAD), ("medium", excel.WARN), ("low", excel.INFO)]
+
+    wb = Workbook()
+    excel.write_sheet(wb, "To-Do", todo.TODO_COLS, todo_rows,
+                      widths=[9, 16, 20, 34, 14, 36, 40, 55, 45, 38, 16, 8],
+                      status_cols=["Priority"], rules=priority_rules, row_height=40)
+
+    counts = {c: sum(1 for r in todo_rows if r["Priority"] == c) for c in todo.PRIORITY_ORDER}
+    products = {c: sum(1 for r in master if r["Concern Level"] == c) for c in CONCERN_ORDER}
+    items = [
+        ("Products checked", len(master), None),
+        ("Products with no problems", products["Pass"], excel.GOOD),
+        ("Products with something to fix", len(master) - products["Pass"], excel.WARN),
+        ("", "", None),
+        ("To-do items by priority:", "", None),
+        ("  High — fix first", counts["High"], excel.BAD),
+        ("  Medium — fix soon", counts["Medium"], excel.WARN),
+        ("  Low — needs a person to look", counts["Low"], excel.INFO),
+        ("", "", None),
+        ("To-do items by check:", "", None),
+    ]
+    for s in STAGES:
+        if s.key in stage_results:
+            n = sum(1 for r in todo_rows if r["Check"] == s.label)
+            items.append((f"  {s.label}", n, excel.WARN if n else excel.GOOD))
+        elif s.key in stage_notes:
+            items.append((f"  {s.label} — {stage_notes[s.key]}", "-", excel.INFO))
+    excel.write_summary(wb, "Summary", items, heading="Beam Dynamics QA — Summary")
 
     columns = ["Manufacturer", "Model", "Product Name", "Source File", "File Row", "Product ID",
                "Concern Level", "Concern Summary"]
@@ -167,32 +199,9 @@ def save_master_report(df, stage_results, stage_notes, path: str) -> list:
         widths += [14, 45]
     columns.append("Beam Insights URL")
     widths.append(45)
-
-    wb = Workbook()
-    excel.write_sheet(wb, "Master QA", columns, master, widths=widths,
+    excel.write_sheet(wb, "All Products", columns, master, widths=widths,
                       status_cols=["Concern Level"] + [s.label for s in ran],
-                      rules=[("high", excel.BAD), ("medium", excel.WARN), ("low", excel.INFO)]
-                      + excel.DEFAULT_STATUS_RULES, row_height=48)
-
-    counts = {c: sum(1 for r in master if r["Concern Level"] == c) for c in CONCERN_ORDER}
-    items = [
-        ("Total products checked", len(master), None),
-        ("", "", None),
-        ("By concern level:", "", None),
-        ("  High — immediate action needed", counts["High"], excel.BAD),
-        ("  Medium — review recommended", counts["Medium"], excel.WARN),
-        ("  Low — verify when possible", counts["Low"], excel.INFO),
-        ("  Pass — no issues found", counts["Pass"], excel.GOOD),
-        ("", "", None),
-        ("By check (products flagged):", "", None),
-    ]
-    for s in STAGES:
-        if s.key in stage_results:
-            n = sum(1 for r in stage_results[s.key].values() if concern(r.get("qa_status")) != "Pass")
-            items.append((f"  {s.label}", n, excel.WARN if n else excel.GOOD))
-        elif s.key in stage_notes:
-            items.append((f"  {s.label} — {stage_notes[s.key]}", "-", excel.INFO))
-    excel.write_summary(wb, "Summary", items, heading="Beam Dynamics QA Suite — Master Report")
+                      rules=priority_rules + excel.DEFAULT_STATUS_RULES, row_height=48)
 
     if "duplicates" in stage_results:
         dup = importlib.import_module("tools.duplicates.core")
@@ -202,3 +211,5 @@ def save_master_report(df, stage_results, stage_notes, path: str) -> list:
 
     wb.save(path)
     return master
+
+

@@ -548,7 +548,10 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
         progress=progress, status=status, label=NAME, stop=stop,
         review_result=lambda rec, why: _needs_review([rec], why)[0],
     )
+    db_by_row = {rec["_row"]: rec["product_status"] for rec in records}
     for row, r in answered.items():
+        # The recorded status comes from the file, not from the model's echo.
+        r["DB Status"] = db_by_row.get(row, r.get("DB Status", ""))
         results[row] = _pipeline_result(_ensure_mismatch_reason([r])[0])
     return results
 
