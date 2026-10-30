@@ -29,6 +29,7 @@ DEFAULT_MODEL_LABEL = "Claude Haiku 5.5 (cheapest)"
 # Haiku keeps the basic one.
 _SEARCH_TOOL_TYPE = {
     "claude-sonnet-5-5": "web_search_20260209",
+    "claude-opus-5-5": "web_search_20260209",
 }
 _DEFAULT_SEARCH_TOOL_TYPE = "web_search_20250305"
 

@@ -176,7 +176,7 @@ def build_rows(master_rows: list, stage_results: dict, stages: list) -> list:
             res = stage_results.get(stage.key, {}).get(m["_row"])
             for priority, problem, rule, fix in items_for(stage.key, res):
                 out.append({
-                    "Priority": priority, "Manufacturer": m["Manufacturer"], "Model": m["Model"],
+                    "_row": m["_row"], "Priority": priority, "Manufacturer": m["Manufacturer"], "Model": m["Model"],
                     "Product Name": m["Product Name"], "Check": stage.label, "Problem": problem,
                     "Rule": rule, "Suggested Fix": fix, "Beam Insights URL": m.get("Beam Insights URL", ""),
                     "Product ID": m.get("Product ID", ""), "Source File": m["Source File"],

@@ -3,6 +3,13 @@
 Beam Dynamics' product data QA suite — a desktop app for checking product
 feeds (CSV/Excel). Every tool can run on its own, or all together:
 
+- **DQA Agent** — load a product file and chat: "what's in this file?",
+  "check the status of the Sony products", "what should I fix first?". It
+  runs the checks below for you, follows the DQA rulebook
+  (`app/tools/dqa_agent/rulebook.md`, a copy of the Google Doc), asks before
+  any paid web-search check on more than 25 products, and only reports — it
+  never changes the file. Uses Claude Opus 5.5 to plan and explain; the
+  checks themselves use the model you pick (Haiku 5.5 by default).
 - **Full QA Pipeline** — runs any selection of the checks below on all your
   files at once and writes one `Master_QA_Report_<timestamp>.xlsx`. Its
   first sheet is a short **To-Do** list: only products with a problem, one

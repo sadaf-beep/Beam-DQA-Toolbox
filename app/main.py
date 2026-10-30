@@ -9,6 +9,13 @@ import theme
 
 TOOLS = [
     Tool(
+        key="dqa_agent",
+        name="DQA Agent",
+        description="Chat with an assistant that checks your product file like a DQA team member.",
+        icon=ft.Icons.SUPPORT_AGENT,
+        view_module="tools.dqa_agent.view",
+    ),
+    Tool(
         key="qa_pipeline",
         name="Full QA Pipeline",
         description="Run every QA check on product files and get one Master QA Report ranked by concern.",
