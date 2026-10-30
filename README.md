@@ -87,6 +87,7 @@ app/
       view.py                — the Status Checker's Flet screen
 ```
 
-To add another tool later: create `app/tools/<name>/` with a `build(page)`
-function, then register a `Tool(...)` entry for it in `app/main.py`'s `TOOLS`
-list — it'll show up on the home screen automatically.
+To add another tool later: create `app/tools/<name>/view.py` with a
+`build(page)` function, then register a
+`Tool(..., view_module="tools.<name>.view")` entry in `app/main.py`'s `TOOLS`
+list (the module is only imported when the tool is opened, so startup stays fast) — it'll show up on the home screen automatically.

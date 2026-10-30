@@ -1,10 +1,10 @@
 """Toolbox — launcher shell for the app suite. Run with: python app/main.py"""
 
+import threading
+
 import flet as ft
 
 from tools.base import Tool
-from tools.link_checker import view as link_checker_view
-from tools.status_checker import view as status_checker_view
 import theme
 
 TOOLS = [
@@ -13,14 +13,14 @@ TOOLS = [
         name="Link Checker",
         description="Scan CSV/Excel files for broken image and product links.",
         icon=ft.Icons.LINK,
-        build=link_checker_view.build,
+        view_module="tools.link_checker.view",
     ),
     Tool(
         key="status_checker",
         name="Status Checker",
         description="Verify product lifecycle status (supported/discontinued) via the Claude API.",
         icon=ft.Icons.FACT_CHECK,
-        build=status_checker_view.build,
+        view_module="tools.status_checker.view",
     ),
 ]
 
@@ -83,7 +83,20 @@ def main(page: ft.Page):
             bgcolor=theme.HEADER_BG,
             padding=ft.Padding(10, 10, 10, 10),
         )
-        content_area.content = ft.Column([header, tool.build(page)], spacing=0, expand=True)
+        # The tool's module (and its heavy deps) may still be importing, so
+        # show the header with a spinner first instead of a frozen screen.
+        loading = ft.Container(
+            content=ft.Row([ft.ProgressRing(width=18, height=18, stroke_width=2),
+                            ft.Text(f"Loading {tool.name}...", color=theme.MUTED)], spacing=10),
+            padding=30,
+        )
+        content_area.content = ft.Column([header, loading], spacing=0, expand=True)
+        page.update()
+        try:
+            body = tool.build(page)
+        except Exception as ex:
+            body = ft.Container(ft.Text(f"Could not open {tool.name}: {ex}", color=theme.BAD), padding=30)
+        content_area.content = ft.Column([header, body], spacing=0, expand=True)
         page.update()
 
     header_bar = ft.Container(
@@ -101,6 +114,16 @@ def main(page: ft.Page):
 
     page.add(ft.Column([header_bar, content_area], spacing=0, expand=True))
     show_home()
+
+    # Warm up the shared heavy libraries in the background once the window
+    # is showing, so the first tool opened usually doesn't wait on them.
+    def preload():
+        try:
+            import pandas, requests, openpyxl, anthropic  # noqa: F401
+        except Exception:
+            pass
+
+    threading.Thread(target=preload, daemon=True).start()
 
 
 if __name__ == "__main__":
