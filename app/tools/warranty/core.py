@@ -3,8 +3,8 @@ Warranty Validation engine — pure Python, no UI dependency.
 
 Asks Claude (with web search) whether each product's recorded
 warranty_length (in days) matches the manufacturer's published warranty.
-In this database 36500 days means LIFETIME — an intentional convention,
-not an error. Follows the engine contract described in
+In this database 36500 days and -1 both mean LIFETIME (confirmed by the DQA
+team) — an intentional convention, not an error. Follows the engine contract described in
 tools/product_name_qa/core.py.
 """
 
@@ -21,7 +21,8 @@ You are a warranty verification agent for a professional broadcast equipment dat
 Your job is to verify whether the recorded warranty_length (in days) is correct for each product.
 
 DATABASE CONVENTION — IMPORTANT:
-warranty_length = 36500 means LIFETIME WARRANTY in this database.
+warranty_length = 36500 means LIFETIME WARRANTY in this database (the export
+also uses -1 for lifetime; those arrive here already converted to 36500).
 This is NOT a data error. It is an intentional convention.
 
 VERIFICATION LOGIC — follow this exactly for every product:
@@ -103,10 +104,9 @@ def missing_columns(df) -> list:
     return missing
 
 
-# The Studio export uses -1 on items like licenses and mounting kits; it's
-# read as "no warranty recorded / not applicable", not as an invalid value.
-NOT_APPLICABLE = "-1"
-NOT_APPLICABLE_NOTE = "warranty_length is -1 (no warranty recorded / not applicable) — not checked"
+# The Studio export also writes lifetime warranties as -1 (confirmed by the
+# DQA team), so -1 is checked exactly like 36500.
+LIFETIME_ALIASES = {"-1", str(LIFETIME_DAYS)}
 
 
 def _valid_days(value: str) -> bool:
@@ -138,9 +138,8 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
     for _, row in df.iterrows():
         rec = cols.product(row)
         days = clean(row.get(w_col))
-        if days == NOT_APPLICABLE:
-            results[row[ROW_COL]] = _result("Skip", NOT_APPLICABLE_NOTE)
-            continue
+        if days in LIFETIME_ALIASES:
+            days = str(LIFETIME_DAYS)
         if not _valid_days(days):
             results[row[ROW_COL]] = _result(
                 "Error", f"warranty_length is blank, zero or not a number ({days or 'blank'}).")
@@ -180,7 +179,7 @@ def summarize(results: dict) -> list:
         ("Warning — using MFR standard / uncertain", _count(results, "warning"), excel.WARN),
         ("Unknown — no data found", _count(results, "unknown"), excel.INFO),
         ("Error — invalid warranty value", _count(results, "error"), excel.REVIEW),
-        ("Skipped — -1 (not applicable) or nothing to search for", _count(results, "skip"), excel.INFO),
+        ("Skipped — nothing to search for", _count(results, "skip"), excel.INFO),
         ("Needs human review (API couldn't process)", _count(results, claude.NEEDS_REVIEW), excel.REVIEW),
     ]
 

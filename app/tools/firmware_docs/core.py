@@ -27,20 +27,6 @@ FIELD DEFINITIONS:
                      FALSE = documents have NOT been added yet
 A field missing from the input means the database doesn't track it — set its flag to "N/A".
 
-LINKS ALREADY IN OUR SYSTEM (optional input fields):
-- document_urls_on_file: document links (manuals, datasheets) already stored for this product
-- resource_urls_on_file: other resource links already stored (release notes, guides, drawings)
-- update_urls_on_file:   firmware/software update links already stored
-Each is a list (possibly trimmed — a matching *_count field gives the full number).
-These links are part of our own record, so use them as evidence:
-- documents added = FALSE but document_urls_on_file is non-empty → documents clearly exist
-  and are already on file, so FALSE is not correct: flag_documents = "Flag" and say so in the note.
-- Firmware Added = FALSE but update_urls_on_file holds genuine firmware/update links →
-  flag_firmware_added = "Flag" and say so in the note.
-- Links on file that are clearly not what their field says (e.g. a user manual listed as an
-  update link) are worth one short mention in the note.
-You don't need to search again for something these links already prove exists.
-
 WHAT COUNTS AS FIRMWARE (search for these):
 Firmware binary files (.bin, .hex, .img), firmware update packages,
 software updates, firmware release notes, official downloads from the
@@ -152,12 +138,9 @@ FLAG_FIELDS = {
     "documents added": ("documents added", "documents_added", "docs added"),
 }
 
-# Studio export link columns (semicolon-separated) → record field sent to
-# the model. Lists are trimmed so a product with dozens of links doesn't
-# balloon the prompt.
-URL_FIELDS = {"doc_urls": "document_urls_on_file", "resource_urls": "resource_urls_on_file",
-              "update_urls": "update_urls_on_file"}
-MAX_URLS = 5
+# The Studio export's Document/Resource/Update URL columns are deliberately
+# not used: documents are uploaded into Beam manually and firmware links
+# aren't part of this check — only whether firmware exists and was added.
 
 # Contradiction is worse than a plain flag, so it's checked first.
 RULES = [("flag (contradiction)", excel.BAD)] + excel.DEFAULT_STATUS_RULES + [
@@ -177,31 +160,6 @@ def missing_columns(df) -> list:
     return missing
 
 
-def _url_list(val) -> list:
-    return [u.strip() for u in clean(val).split(";") if u.strip()]
-
-
-def _is_true(val) -> bool:
-    return clean(val).upper() in ("TRUE", "1", "YES")
-
-
-def _consistency(row, cols: Columns, flag_cols: dict) -> str:
-    """Local check of each added-flag against its stored link column — only
-    where the file has both. Informational: it never changes the status."""
-    issues = []
-    for flag, attr, what in (("documents added", "doc_urls", "Document URLs"),
-                             ("Firmware Added", "update_urls", "Update URLs")):
-        flag_col, url_col = flag_cols.get(flag), getattr(cols, attr)
-        if flag_col is None or url_col is None or not clean(row.get(flag_col)):
-            continue
-        has_urls = bool(_url_list(row.get(url_col)))
-        if _is_true(row.get(flag_col)) and not has_urls:
-            issues.append(f"{flag} is TRUE but {what} is empty")
-        elif not _is_true(row.get(flag_col)) and has_urls:
-            issues.append(f"{flag} is FALSE but {what} has links")
-    return "; ".join(issues)
-
-
 def _result(status: str, note: str, **extra) -> dict:
     r = {"overall_status": status, "note": note}
     r.update(extra)
@@ -218,9 +176,8 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
         stop=None) -> dict:
     cols = Columns(df)
     flag_cols = _flag_cols(df)
-    results, records, consistency = {}, [], {}
+    results, records = {}, []
     for _, row in df.iterrows():
-        consistency[row[ROW_COL]] = _consistency(row, cols, flag_cols)
         rec = cols.product(row)
         if not rec["model"] and not rec["product_name"]:
             results[row[ROW_COL]] = _result("Skip", "No model number or product name — nothing to search for.")
@@ -229,13 +186,6 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
             rec[field] = clean(row.get(col))
         if cols.url and clean(row.get(cols.url)):
             rec["product_url"] = clean(row.get(cols.url))
-        for attr, field in URL_FIELDS.items():
-            col = getattr(cols, attr)
-            urls = _url_list(row.get(col)) if col else []
-            if urls:
-                rec[field] = urls[:MAX_URLS]
-                if len(urls) > MAX_URLS:
-                    rec[field.replace("_on_file", "_count")] = len(urls)
         rec["_row"] = row[ROW_COL]
         records.append(rec)
 
@@ -248,14 +198,6 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
     )
     for row, r in answered.items():
         results[row] = _normalise(r)
-
-    for row, r in results.items():
-        r["consistency_note"] = consistency.get(row, "")
-        if r["consistency_note"]:
-            r["qa_note"] = f"{r['qa_note']} Data consistency: {r['consistency_note']}.".strip()
-    n = sum(1 for r in results.values() if r["consistency_note"])
-    if n:
-        log(f"{n} product(s) have added-flags that don't match their stored links", "warn")
     return results
 
 
@@ -288,8 +230,6 @@ def summarize(results: dict) -> list:
         ("  Firmware not yet added to system",
          _count(results, "flag_firmware_added", "flag", contains=True), excel.WARN),
         ("  Documents not yet added to system", _count(results, "flag_documents", "flag"), excel.WARN),
-        ("  Added-flag doesn't match stored links (data consistency)",
-         sum(1 for r in results.values() if r.get("consistency_note")), excel.WARN),
         ("", "", None),
         ("Firmware found online (total)",
          sum(1 for r in results.values() if r.get("firmware_found_online") is True), None),
@@ -314,7 +254,7 @@ def save_excel(df, results: dict, path: str) -> None:
                "Firmware Found Online", "Firmware Source",
                "has_firmware Flag", "Firmware Added Flag",
                "Documents Found Online", "Documents Source",
-               "Documents Flag", "Overall Status", "Note", "Data Consistency", REF_COLS[1]]
+               "Documents Flag", "Overall Status", "Note", REF_COLS[1]]
     rows = []
     for _, row in df.iterrows():
         r = results.get(row[ROW_COL])
@@ -328,7 +268,6 @@ def save_excel(df, results: dict, path: str) -> None:
         rows.append({
             "Source File": row.get(SOURCE_COL, ""), **cols.refs(row),
             "Manufacturer": p["mfr"], "Model": p["model"], "Product Name": p["product_name"],
-            "Data Consistency": r.get("consistency_note", ""),
             "has_firmware (DB)": db("has_firmware"), "Firmware Added (DB)": db("Firmware Added"),
             "documents added (DB)": db("documents added"),
             "Firmware Found Online": _yes_no(r.get("firmware_found_online")),
@@ -342,7 +281,7 @@ def save_excel(df, results: dict, path: str) -> None:
         })
     wb = Workbook()
     excel.write_sheet(wb, "Firmware & Docs", columns, rows,
-                      widths=[14, 38, 16, 22, 38, 14, 16, 16, 18, 44, 16, 18, 20, 44, 14, 14, 55, 40, 45],
+                      widths=[14, 38, 16, 22, 38, 14, 16, 16, 18, 44, 16, 18, 20, 44, 14, 14, 55, 45],
                       status_cols=["Firmware Found Online", "has_firmware Flag", "Firmware Added Flag",
                                    "Documents Found Online", "Documents Flag", "Overall Status"],
                       rules=RULES, row_height=52)

@@ -35,8 +35,8 @@ def build(page: ft.Page) -> ft.Control:
     return ui.tool_screen(
         page,
         run_label="Run Warranty Check",
-        caption="Needs mfr, model and warranty_length (in days; 36500 = lifetime, -1 = not applicable "
-                "and skipped). Page URL (or product_url) is optional — it's checked first for warranty "
+        caption="Needs mfr, model and warranty_length (in days; 36500 or -1 = lifetime)."
+                " Page URL (or product_url) is optional — it's checked first for warranty "
                 "terms. Uses web search.",
         needs_api=True,
         default_batch="5", default_pause="10s",
