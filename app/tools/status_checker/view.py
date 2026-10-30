@@ -158,6 +158,9 @@ def build(page: ft.Page) -> ft.Control:
     run_button = ft.Button("Run Status Check", icon=ft.Icons.PLAY_ARROW,
                             bgcolor=theme.ACCENT, color="white", disabled=True)
     open_button = ft.OutlinedButton("Open Results File", icon=ft.Icons.FOLDER_OPEN, visible=False)
+    stop_button = ft.OutlinedButton("Stop", icon=ft.Icons.STOP_CIRCLE, icon_color=theme.BAD,
+                                     visible=False)
+    stop_event = {"event": threading.Event()}
 
     def log(msg, tag="info"):
         color = {"ok": theme.GOOD, "bad": theme.BAD, "info": theme.INFO,
@@ -183,6 +186,14 @@ def build(page: ft.Page) -> ft.Control:
             page.launch_url(f"file://{result_path['path']}")
 
     open_button.on_click = open_results
+
+    def request_stop(e=None):
+        stop_event["event"].set()
+        stop_button.disabled = True
+        log("Stopping after the current batch — results so far will be saved...", "warn")
+        set_status("Stopping...")
+
+    stop_button.on_click = request_stop
 
     # ── Run ─────────────────────────────────────────────────
     def run_worker(start_time):
@@ -230,7 +241,7 @@ def build(page: ft.Page) -> ft.Control:
                 try:
                     file_results, total_rows, _ = core.check_file(
                         path, client, model, batch_size, batch_pause, skip_keys,
-                        on_progress, log, set_status,
+                        on_progress, log, set_status, stop=stop_event["event"],
                     )
                 except core.FatalAPIError as ex:
                     log(f"Stopping — {ex}", "bad")
@@ -255,6 +266,10 @@ def build(page: ft.Page) -> ft.Control:
                 review_val.value = str(sum(1 for r in all_results if str(r.get("Verified Status", "")).lower() == core.NEEDS_REVIEW_STATUS))
                 page.update()
 
+                if stop_event["event"].is_set():
+                    stopped_early = True
+                    break
+
             elapsed = time.time() - start_time
             duration_str = _format_duration(elapsed)
 
@@ -270,9 +285,11 @@ def build(page: ft.Page) -> ft.Control:
             avg_str = f"{elapsed / len(all_results):.1f}s/product" if all_results else "n/a"
 
             if stopped_early:
-                log(f"Stopped early after {duration_str} — {len(all_results)} product(s) saved before the error "
-                    f"({avg_str}). Fix the issue and re-run with Recovery mode on to pick up the rest. "
-                    f"Saved to: {out_path}", "bad")
+                why = ("you stopped the run" if stop_event["event"].is_set()
+                       else "the error — fix the issue and")
+                log(f"Stopped early after {duration_str} — {len(all_results)} product(s) saved before "
+                    f"{why} ({avg_str}). Re-run with Recovery mode on to pick up the rest. "
+                    f"Saved to: {out_path}", "warn" if stop_event["event"].is_set() else "bad")
                 status_text.value = "Stopped"
                 open_button.visible = True
                 page.update()
@@ -290,6 +307,7 @@ def build(page: ft.Page) -> ft.Control:
 
         finally:
             running["value"] = False
+            stop_button.visible = False
             run_button.disabled = False
             run_button.text = "Run Status Check"
             check_ready()
@@ -301,6 +319,9 @@ def build(page: ft.Page) -> ft.Control:
         run_button.disabled = True
         run_button.text = "Running..."
         open_button.visible = False
+        stop_event["event"] = threading.Event()
+        stop_button.visible = True
+        stop_button.disabled = False
         progress.value = 0
         log_view.controls.clear()
         log(f"Starting status check on {len(file_paths)} file(s)...", "info")
@@ -347,8 +368,8 @@ def build(page: ft.Page) -> ft.Control:
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
     )
     files_caption = ft.Text(
-        "Needs mfr, model, and product_status columns (product name and product_url are optional — "
-        "a product_url lets the tool check that page directly before falling back to a full web search).",
+        "Needs mfr, model, and product_status columns (product name and Page URL are optional — "
+        "a Page URL lets the tool check that page directly before falling back to a full web search).",
         size=10, color=theme.MUTED,
     )
 
@@ -364,7 +385,7 @@ def build(page: ft.Page) -> ft.Control:
         spacing=10,
     )
 
-    run_row = ft.Row([run_button, open_button, status_text, elapsed_text], spacing=12)
+    run_row = ft.Row([run_button, stop_button, open_button, status_text, elapsed_text], spacing=12)
     stats_row = ft.Row([checked_box, confirmed_box, mismatch_box, unknown_box, review_box], spacing=10)
 
     return ft.Container(

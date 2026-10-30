@@ -22,12 +22,12 @@ def run(ctx: ui.RunContext):
 
     results = core.run(df, ctx.client, ctx.model, ctx.batch_size, ctx.batch_pause, ctx.log,
                        progress=lambda done, total: ctx.set_progress(done / total),
-                       status=ctx.set_status)
+                       status=ctx.set_status, stop=ctx.stop)
     out_path = os.path.join(ctx.out_dir, f"Product_Name_QA_{datetime.now():%Y%m%d_%H%M}.xlsx")
     core.save_excel(df, results, out_path)
     values = list(results.values())
     fails = _count("fail")(values)
-    return values, out_path, f"Done — {len(values)} products checked, {fails} fail(s)."
+    return values, out_path, f"{len(values)} products checked, {fails} fail(s)."
 
 
 def build(page: ft.Page) -> ft.Control:

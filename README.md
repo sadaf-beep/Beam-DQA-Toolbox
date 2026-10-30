@@ -8,7 +8,7 @@ feeds (CSV/Excel). Every tool can run on its own, or all together:
   per product, sorted by concern level (High / Medium / Low / Pass). Checks
   skip themselves when the files don't have their columns.
 - **Duplicate Detection** — exact, cross-brand and near-match duplicates. Free.
-- **OEM URL Check** — is `product_url` the manufacturer's site or a
+- **OEM URL Check** — is `Page URL` the manufacturer's site or a
   retailer, and does `is_oem_url` say the same? Free.
 - **Link Checker** — broken image and product page links. Free.
 - **Status Checker** — are products still supported or discontinued?
@@ -22,6 +22,14 @@ feeds (CSV/Excel). Every tool can run on its own, or all together:
 - **Dimensions Validation** — are `product_dimension` /
   `package_dimensions` consistent and accurate? (Claude + web search)
 - **File Splitter** — split a large file into smaller CSVs.
+
+Files are expected in the **Studio export** format (`product id`, `mfr`,
+`model`, `product name`, `Image URL`, `Page URL`, `is_oem_url`, …,
+`Beam Insights URL`); older exports with `product_url` / `Image Url` still
+work, since columns are matched by name regardless of case. Every report
+includes each product's **Product ID** and **Beam Insights URL**, and every
+run has a **Stop** button — it finishes the current batch, saves what's done,
+and marks the rest Needs Review.
 
 The Claude tools share one saved API key and let you pick Claude Haiku 5.5
 (default, cheapest) or Claude Sonnet 5.5 (more thorough). A batch the API
@@ -53,8 +61,8 @@ A window opens with a "Toolbox" home screen.
 
 ### Link Checker
 
-1. **Add Files** — pick one or more CSV/Excel files (must have `Image Url`
-   and `product_url` columns).
+1. **Add Files** — pick one or more CSV/Excel files (needs an `Image URL`
+   and/or `Page URL` column).
 2. **Choose Folder** — pick where the results should be saved.
 3. **Run Checker** — checks all files in parallel; only broken links are
    logged and saved. Each input file gets its own
@@ -66,7 +74,7 @@ A window opens with a "Toolbox" home screen.
    [console.anthropic.com](https://console.anthropic.com)) and save it; it's
    stored locally and only ever sent to the Claude API.
 2. **Add CSV files** — needs `mfr`, `model`, and `product_status` columns.
-   `product name` and `product_url` are optional — a `product_url` lets the
+   `product name` and `Page URL` are optional — a `Page URL` lets the
    tool check that page directly before falling back to a full web search.
 3. **Choose output folder**, then **Run Status Check**. Results (and a
    Summary sheet) are written incrementally to

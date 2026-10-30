@@ -15,7 +15,7 @@ Engine contract shared by every QA tool (the pipeline relies on it):
 from openpyxl import Workbook
 
 from tools.common import claude, excel
-from tools.common.data import ROW_COL, SOURCE_COL, Columns
+from tools.common.data import REF_COLS, ROW_COL, SOURCE_COL, Columns
 
 NAME = "Product Name QA"
 REQUIRED_COLS = ["mfr", "model"]
@@ -102,7 +102,8 @@ def _normalise(r: dict) -> dict:
     return r
 
 
-def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None) -> dict:
+def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None,
+        stop=None) -> dict:
     cols = Columns(df)
     results, records = {}, []
     for _, row in df.iterrows():
@@ -118,7 +119,7 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
     answered = claude.run_batches(
         client, model, records, SYSTEM_PROMPT, use_search=False,
         batch_size=batch_size, batch_pause=batch_pause, log=log,
-        progress=progress, status=status, label=NAME,
+        progress=progress, status=status, label=NAME, stop=stop,
         review_result=lambda rec, why: _result(claude.NEEDS_REVIEW, why),
     )
     for row, r in answered.items():
@@ -142,8 +143,8 @@ def summarize(results: dict) -> list:
 
 def save_excel(df, results: dict, path: str) -> None:
     cols = Columns(df)
-    columns = ["Source File", "Manufacturer", "Model", "Product Name", "Overall Status",
-               "General Feedback", "Flagged Fields", "Issues", "Suggested Corrections"]
+    columns = ["Source File", REF_COLS[0], "Manufacturer", "Model", "Product Name", "Overall Status",
+               "General Feedback", "Flagged Fields", "Issues", "Suggested Corrections", REF_COLS[1]]
     rows = []
     for _, row in df.iterrows():
         r = results.get(row[ROW_COL])
@@ -151,13 +152,14 @@ def save_excel(df, results: dict, path: str) -> None:
             continue
         p = cols.product(row)
         rows.append({
-            "Source File": row.get(SOURCE_COL, ""), "Manufacturer": p["mfr"], "Model": p["model"],
+            "Source File": row.get(SOURCE_COL, ""), **cols.refs(row),
+            "Manufacturer": p["mfr"], "Model": p["model"],
             "Product Name": p["product_name"], "Overall Status": r["qa_status"],
             "General Feedback": r.get("general_feedback", ""), "Flagged Fields": r.get("flagged_fields", ""),
             "Issues": r.get("issues", ""), "Suggested Corrections": r.get("suggested_corrections", ""),
         })
     wb = Workbook()
-    excel.write_sheet(wb, "QA Results", columns, rows, widths=[18, 20, 24, 44, 14, 48, 28, 55, 55],
+    excel.write_sheet(wb, "QA Results", columns, rows, widths=[18, 38, 20, 24, 44, 14, 48, 28, 55, 55, 45],
                       status_cols=["Overall Status"], row_height=52)
     excel.write_summary(wb, "Summary", summarize(results), heading=f"{NAME} — Summary")
     wb.save(path)

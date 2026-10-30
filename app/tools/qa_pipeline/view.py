@@ -38,7 +38,7 @@ def build(page: ft.Page) -> ft.Control:
         stage_results, stage_notes = core.run_pipeline(
             df, keys, client=ctx.client, model=ctx.model, batch_size=ctx.batch_size,
             batch_pause=ctx.batch_pause, log=ctx.log, progress=ctx.set_progress,
-            status=ctx.set_status,
+            status=ctx.set_status, stop=ctx.stop,
             options={"dup_threshold": int(ctx.options["dup_threshold"].rstrip("%")) / 100},
         )
 
@@ -53,7 +53,7 @@ def build(page: ft.Page) -> ft.Control:
         run_label="Run Full QA Pipeline",
         caption="Runs every selected check on all files together and writes one Master QA Report "
                 "sorted by concern level. Checks skip themselves when the files lack their columns "
-                "(mfr, model, product name, product_url, Image Url, is_oem_url, product_status, "
+                "(mfr, model, product name, Page URL, Image URL, is_oem_url, product_status, "
                 "has_firmware, Firmware Added, documents added, warranty_length, product_dimension, "
                 "package_dimensions). Test on a small file first — web-search checks cost the most.",
         needs_api=True,

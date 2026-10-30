@@ -40,6 +40,9 @@ class RunContext:
     batch_size: int = 5
     batch_pause: int = 10
     options: dict = field(default_factory=dict)  # values of extra settings, by key
+    # Set when the user clicks Stop — engines check it between batches and
+    # the run function still saves whatever was finished.
+    stop: threading.Event = field(default_factory=threading.Event)
 
 
 def format_duration(seconds: float) -> str:
@@ -189,6 +192,9 @@ def tool_screen(page: ft.Page, *, run_label: str, caption: str, stats: list,
     run_button = ft.Button(run_label, icon=ft.Icons.PLAY_ARROW,
                             bgcolor=theme.ACCENT, color="white", disabled=True)
     open_button = ft.OutlinedButton("Open Results File", icon=ft.Icons.FOLDER_OPEN, visible=False)
+    stop_button = ft.OutlinedButton("Stop", icon=ft.Icons.STOP_CIRCLE, icon_color=theme.BAD,
+                                     visible=False)
+    stop_event = {"event": threading.Event()}
 
     def log(msg, tag="info"):
         color = {"ok": theme.GOOD, "bad": theme.BAD, "info": theme.INFO,
@@ -224,6 +230,14 @@ def tool_screen(page: ft.Page, *, run_label: str, caption: str, stats: list,
 
     open_button.on_click = open_results
 
+    def request_stop(e=None):
+        stop_event["event"].set()
+        stop_button.disabled = True
+        log("Stopping — finishing the current step, then saving what's done...", "warn")
+        set_status("Stopping...")
+
+    stop_button.on_click = request_stop
+
     # ── Run ─────────────────────────────────────────────────
     def run_worker(start_time):
         try:
@@ -231,6 +245,7 @@ def tool_screen(page: ft.Page, *, run_label: str, caption: str, stats: list,
                 files=list(file_paths), out_dir=out_dir["path"], log=log,
                 set_status=set_status, set_progress=set_progress, show_results=show_results,
                 options={k: c.value for k, c in extra_settings.items()},
+                stop=stop_event["event"],
             )
             if needs_api:
                 api_key = cfg.get("claude_api_key")
@@ -258,16 +273,21 @@ def tool_screen(page: ft.Page, *, run_label: str, caption: str, stats: list,
 
             show_results(results)
             elapsed = format_duration(time.time() - start_time)
+            stopped = ctx.stop.is_set()
+            if stopped:
+                done_msg = f"Stopped early — partial results only. {done_msg}"
             if out_path:
                 result_path["path"] = out_path
                 open_button.visible = True
-                log(f"{done_msg} ({elapsed}) Saved to: {out_path}", "ok")
+                log(f"{done_msg} ({elapsed}) Saved to: {out_path}", "warn" if stopped else "ok")
             else:
                 log(f"{done_msg} ({elapsed})", "warn")
-            status_text.value = "Complete"
-            progress.value = 1.0
+            status_text.value = "Stopped" if stopped else "Complete"
+            if not stopped:
+                progress.value = 1.0
         finally:
             running["value"] = False
+            stop_button.visible = False
             run_button.text = run_label
             page.update()
             check_ready()
@@ -279,6 +299,9 @@ def tool_screen(page: ft.Page, *, run_label: str, caption: str, stats: list,
         run_button.disabled = True
         run_button.text = "Running..."
         open_button.visible = False
+        stop_event["event"] = threading.Event()
+        stop_button.visible = True
+        stop_button.disabled = False
         progress.value = 0
         log_view.controls.clear()
         log(f"Starting on {len(file_paths)} file(s)...", "info")
@@ -350,7 +373,7 @@ def tool_screen(page: ft.Page, *, run_label: str, caption: str, stats: list,
 
     sections.append(theme.card_container(ft.Column(
         [
-            ft.Row([run_button, open_button, status_text, elapsed_text], spacing=12),
+            ft.Row([run_button, stop_button, open_button, status_text, elapsed_text], spacing=12),
             progress,
             ft.Row([box for _s, box, _v in stat_widgets], spacing=10, wrap=True),
             theme.card_container(log_view, padding=8),

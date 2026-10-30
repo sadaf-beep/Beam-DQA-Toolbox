@@ -15,8 +15,6 @@ from requests.adapters import HTTPAdapter
 
 from tools.common.data import ROW_COL, Columns, clean
 
-IMAGE_COL = "Image Url"
-PRODUCT_COL = "product_url"
 WORKERS = 20
 TIMEOUT = 10
 USER_AGENT = "Mozilla/5.0 (compatible; LinkChecker/2.0)"
@@ -25,6 +23,9 @@ USER_AGENT = "Mozilla/5.0 (compatible; LinkChecker/2.0)"
 CONFIRMED_BROKEN_CODES = (404, 410)
 # Transient responses worth one retry before judging them at all.
 RETRYABLE_CODES = (429, 503)
+# Label for links a stopped run never reached — contains "REVIEW" so they
+# land in the review output instead of silently passing.
+NOT_CHECKED = "REVIEW - not checked (run stopped)"
 
 
 def new_session(pool_size: int = WORKERS) -> requests.Session:
@@ -133,10 +134,18 @@ def load_df(path: str) -> pd.DataFrame:
         raise ValueError(f"Unsupported file type: {ext}")
 
 
+def link_columns(df):
+    """(image column, product page column) — either may be None. Accepts the
+    Studio export's "Image URL" / "Page URL" and older "Image Url" /
+    "product_url" headers."""
+    cols = Columns(df)
+    return cols.image, cols.url
+
+
 def check_file(path: str, session: requests.Session, executor: ThreadPoolExecutor,
-                progress_callback, log_callback):
+                progress_callback, log_callback, stop=None):
     """
-    Checks all Image Url + product_url links in a file using the shared
+    Checks all image + product page links in a file using the shared
     session/executor passed in.
 
     Returns (broken_df, review_df, total_rows, total_broken, total_review).
@@ -144,27 +153,41 @@ def check_file(path: str, session: requests.Session, executor: ThreadPoolExecuto
     review_df contains rows with an ambiguous response (needs login, still
     rate-limited after retry, server error, etc.) that isn't confidently
     broken. Both have two extra columns: 'Image 404' and 'Product 404'.
+
+    `stop` is an optional threading.Event: once set, links not yet checked
+    are cancelled and labelled NOT_CHECKED (which lands them in review_df).
     """
     df = load_df(path)
 
-    missing = [c for c in [IMAGE_COL, PRODUCT_COL] if c not in df.columns]
-    if missing:
-        raise ValueError(f'Missing columns: {", ".join(missing)}\nFound: {", ".join(df.columns)}')
+    img_col, prod_col = link_columns(df)
+    if img_col is None and prod_col is None:
+        raise ValueError(f'Missing columns: Image URL / Page URL\nFound: {", ".join(df.columns)}')
 
     total = len(df)
     img_res = [""] * total
     prod_res = [""] * total
     done_count = 0
+    name_col = Columns(df).name
 
     tasks = []
     for i in range(total):
-        img = str(df[IMAGE_COL].iloc[i]) if pd.notna(df[IMAGE_COL].iloc[i]) else ""
-        prod = str(df[PRODUCT_COL].iloc[i]) if pd.notna(df[PRODUCT_COL].iloc[i]) else ""
+        img = clean(df[img_col].iloc[i]) if img_col else ""
+        prod = clean(df[prod_col].iloc[i]) if prod_col else ""
         tasks.append((i, "image", img))
         tasks.append((i, "product", prod))
 
     futures = {executor.submit(check_url, session, t[2]): t for t in tasks}
     for fut in as_completed(futures):
+        if stop is not None and stop.is_set():
+            for f, (idx, ctype, _) in futures.items():
+                if not f.done():
+                    f.cancel()
+                    if ctype == "image":
+                        img_res[idx] = NOT_CHECKED
+                    else:
+                        prod_res[idx] = NOT_CHECKED
+            log_callback("Stopped — remaining links were not checked", "warn")
+            break
         idx, ctype, _ = futures[fut]
         label, _broken = fut.result()
 
@@ -178,7 +201,7 @@ def check_file(path: str, session: requests.Session, executor: ThreadPoolExecuto
             pct = int(done_count / total * 100)
             progress_callback(pct, done_count, total)
 
-            name = str(df["product name"].iloc[idx])[:40] if "product name" in df.columns else f"Row {idx + 1}"
+            name = clean(df[name_col].iloc[idx])[:40] if name_col else f"Row {idx + 1}"
             for col_label, res in (("Image", img_res[idx]), ("Product", prod_res[idx])):
                 if "BROKEN" in res:
                     log_callback(f"[{idx + 1}] {name} — {col_label}: {res}", "bad")
@@ -215,11 +238,11 @@ NAME = "Link Check"
 def missing_columns(df) -> list:
     cols = Columns(df)
     if cols.image is None and cols.url is None:
-        return ["Image Url or product_url"]
+        return ["Image URL or Page URL"]
     return []
 
 
-def run(df, log, progress=None) -> dict:
+def run(df, log, progress=None, stop=None) -> dict:
     cols = Columns(df)
     rows = list(df[ROW_COL])
     img = {r: "" for r in rows}
@@ -236,6 +259,13 @@ def run(df, log, progress=None) -> dict:
     try:
         futures = {executor.submit(check_url, session, t[2]): t for t in tasks}
         for done, fut in enumerate(as_completed(futures), 1):
+            if stop is not None and stop.is_set():
+                for f, (row, kind, _) in futures.items():
+                    if not f.done():
+                        f.cancel()
+                        (img if kind == "image" else prod)[row] = NOT_CHECKED
+                log("Stopped — remaining links were not checked", "warn")
+                break
             row, kind, _ = futures[fut]
             label, _broken = fut.result()
             (img if kind == "image" else prod)[row] = label

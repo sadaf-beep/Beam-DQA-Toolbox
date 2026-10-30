@@ -88,16 +88,35 @@ def clean(val) -> str:
     return str(val).strip()
 
 
+# Reference columns from the Studio export, carried into every report so a
+# reviewer can jump straight from a flagged row to the product in Insights.
+REF_COLS = ["Product ID", "Beam Insights URL"]
+
+
 class Columns:
     """Resolved names of the standard product columns for one DataFrame.
-    Attributes are None when the file doesn't have that column."""
+    Attributes are None when the file doesn't have that column. Names cover
+    the current Studio export ("Page URL", "Image URL") and older exports
+    ("product_url", "Image Url")."""
 
     def __init__(self, df: pd.DataFrame):
         self.mfr = find_col(df, "mfr", "manufacturer")
         self.model = find_col(df, "model", "model number")
         self.name = find_col(df, "product name", "name")
-        self.url = find_col(df, "product_url", "product url")
+        self.url = find_col(df, "page url", "product_url", "product url")
         self.image = find_col(df, "image url", "image_url")
+        self.product_id = find_col(df, "product id", "product_id")
+        self.insights_url = find_col(df, "beam insights url", "insights url")
+        self.doc_urls = find_col(df, "document urls")
+        self.resource_urls = find_col(df, "resource urls")
+        self.update_urls = find_col(df, "update urls")
+
+    def refs(self, row) -> dict:
+        """REF_COLS values for a row (blank when the file lacks them)."""
+        return {
+            "Product ID": clean(row.get(self.product_id)) if self.product_id else "",
+            "Beam Insights URL": clean(row.get(self.insights_url)) if self.insights_url else "",
+        }
 
     def product(self, row) -> dict:
         """The identity fields of a row, as cleaned strings."""

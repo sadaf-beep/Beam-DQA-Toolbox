@@ -15,6 +15,8 @@ def run(ctx: ui.RunContext):
     written = []
     total_files = len(ctx.files)
     for fi, path in enumerate(ctx.files, 1):
+        if ctx.stop.is_set():
+            break
         # One shared prefix for several inputs would overwrite each other's
         # batches, so the input name is appended to keep them apart.
         file_prefix = prefix
@@ -25,15 +27,16 @@ def run(ctx: ui.RunContext):
             written += core.split_file(
                 path, ctx.out_dir, rows_per_file, file_prefix, log=ctx.log,
                 progress=lambda done, total, fi=fi: ctx.set_progress(((fi - 1) + done / total) / total_files),
+                stop=ctx.stop,
             )
         except Exception as ex:
             ctx.log(f"Cannot split {Path(path).name}: {ex}", "bad")
         ctx.show_results(written)
-    if not written:
+    if not written and not ctx.stop.is_set():
         raise ValueError("No files could be split")
     rows = sum(w["rows"] for w in written)
     # Returning the folder lets "Open Results File" open the output folder.
-    return written, ctx.out_dir, f"Done — {len(written)} file(s) written, {rows} rows."
+    return written, ctx.out_dir, f"{len(written)} file(s) written, {rows} rows."
 
 
 def build(page: ft.Page) -> ft.Control:

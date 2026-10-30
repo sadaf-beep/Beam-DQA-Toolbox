@@ -5,16 +5,16 @@ Asks Claude (with web search) to check each product's recorded product and
 package dimensions for unit consistency, completeness and accuracy against
 manufacturer specs. Follows the engine contract in product_name_qa/core.py.
 
-Unit consistency is left to the model rather than pre-computed here:
-dimensions are often stored as JSON with no units at all, so a regex
-can't reliably tell "Metric" from "Blank", and a wrong deterministic
-verdict would be worse than the model's.
+Unit consistency is left to the model rather than pre-computed here: the
+Studio export stores dimensions as unitless JSON, so the unit system can
+only be inferred from magnitudes/specs, and a wrong deterministic verdict
+would be worse than the model's (which may answer "Unknown").
 """
 
 from openpyxl import Workbook
 
 from tools.common import claude, excel
-from tools.common.data import ROW_COL, SOURCE_COL, Columns, clean, find_col
+from tools.common.data import REF_COLS, ROW_COL, SOURCE_COL, Columns, clean, find_col
 
 NAME = "Dimensions Validation"
 
@@ -26,9 +26,27 @@ You are a dimensions verification agent for a professional broadcast equipment d
 For each product you must run three checks in order.
 
 DIMENSIONS FORMAT:
-Dimensions may be stored as JSON objects like {"width":"12","height":"8","depth":"4"}
-or as plain strings like "12 x 8 x 4 in" or "305 x 203 x 102 mm".
+Our Studio export stores dimensions as UNITLESS JSON, for example
+  {"width":184.5,"height":145.2,"depth":5.5,"weight":284,"note":"Open dimension"}
+  {"width":21.62,"height":17.25,"depth":4.87,"weight":8.4,"note":"Exterior with foam"}
+Older records may be plain strings like "12 x 8 x 4 in" or "305 x 203 x 102 mm".
 Parse whichever format is present. If a field is null, empty, or missing → treat as blank.
+Individual keys may be null (e.g. "weight":null) — that's a partial record, not an error.
+
+UNITLESS JSON — how to treat it:
+- There are no unit labels, so the unit system can only be INFERRED. Infer it from the
+  magnitudes and the product type (e.g. a 55" TV recorded as width 1223 is clearly mm;
+  a laptop case at 21.62 × 17.25 × 4.87 is clearly inches) or by matching the numbers
+  to the manufacturer's spec in one unit system — and ONLY when you are confident.
+- If you can't confidently infer it, use unit system "Unknown". Unknown is NOT an error:
+  never report "Fail — Inconsistent Units" or "Fail — Mixed Units" unless both unit systems
+  were confidently determined.
+- "weight" is informational: mention a large discrepancy in the note, but base the status
+  on the dimensions.
+- "note" says what was measured or how — e.g. "Open dimension", "With stand",
+  "without Stand", "Maximum", "Exterior with foam". Compare against the matching
+  manufacturer figure (e.g. a "With stand" record against the with-stand spec).
+  A note like "Approximate based on similar product" counts as APPROXIMATE (see Check 3).
 
 ─────────────────────────────────────────
 CHECK 1 — UNIT CONSISTENCY
@@ -42,11 +60,13 @@ Unit system values to assign:
 - "Metric"   → all dimension values use metric units
 - "Imperial" → all dimension values use imperial units
 - "Mixed"    → some values metric, some imperial WITHIN the same field
+- "Unknown"  → values present but no unit labels and the system can't be confidently inferred
 - "Blank"    → field is empty, null, or missing
 
 CONSISTENCY RULE:
 If product_dimension unit system ≠ package_dimensions unit system
-AND neither is "Blank" → flag as INCONSISTENT.
+AND neither is "Blank" or "Unknown" → flag as INCONSISTENT.
+If either is "Unknown" → unit_consistency = "N/A".
 This includes: product=Metric + package=Imperial, or product=Imperial + package=Metric.
 Both Metric = Consistent. Both Imperial = Consistent.
 
@@ -94,6 +114,8 @@ IF DIMENSIONS ARE NOT MARKED AS APPROXIMATE:
     Specs not found   → Unknown (cannot verify)
   When comparing: always convert to the same unit before comparing.
     1 inch = 25.4 mm. Round to 1 decimal place after converting.
+    For unitless JSON, compare in whichever unit system the recorded numbers fit; if they
+    fit the manufacturer spec in neither system, that's a mismatch, not a unit problem.
 
 ─────────────────────────────────────────
 SEARCH STRATEGY:
@@ -123,8 +145,8 @@ One object per product in the input, each with EXACTLY these keys:
 [
   {
     "_id": "exact value from input",
-    "product_unit_system": "Metric OR Imperial OR Mixed OR Blank",
-    "package_unit_system": "Metric OR Imperial OR Mixed OR Blank",
+    "product_unit_system": "Metric OR Imperial OR Mixed OR Unknown OR Blank",
+    "package_unit_system": "Metric OR Imperial OR Mixed OR Unknown OR Blank",
     "unit_consistency": "Consistent OR Inconsistent OR N/A",
     "verified_product_dimensions": "manufacturer spec if found, else empty string",
     "verified_package_dimensions": "manufacturer spec if found, else empty string",
@@ -162,7 +184,8 @@ def _normalise(r: dict) -> dict:
     return r
 
 
-def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None) -> dict:
+def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None,
+        stop=None) -> dict:
     cols = Columns(df)
     prod_col, pkg_col = _dim_cols(df)
     results, records = {}, []
@@ -185,7 +208,7 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
     answered = claude.run_batches(
         client, model, records, SYSTEM_PROMPT, use_search=True,
         batch_size=batch_size, batch_pause=batch_pause, log=log,
-        progress=progress, status=status, label=NAME,
+        progress=progress, status=status, label=NAME, stop=stop,
         review_result=lambda rec, why: _result(claude.NEEDS_REVIEW, why),
     )
     for row, r in answered.items():
@@ -221,11 +244,11 @@ def summarize(results: dict) -> list:
 def save_excel(df, results: dict, path: str) -> None:
     cols = Columns(df)
     prod_col, pkg_col = _dim_cols(df)
-    columns = ["Source File", "Manufacturer", "Model", "Product Name",
+    columns = ["Source File", REF_COLS[0], "Manufacturer", "Model", "Product Name",
                "Recorded Product Dimensions", "Recorded Package Dimensions",
                "Product Unit System", "Package Unit System", "Unit Consistency",
                "Verified Product Dimensions", "Verified Package Dimensions",
-               "Status", "Source", "Note"]
+               "Status", "Source", "Note", REF_COLS[1]]
     rows = []
     for _, row in df.iterrows():
         r = results.get(row[ROW_COL])
@@ -233,8 +256,8 @@ def save_excel(df, results: dict, path: str) -> None:
             continue
         p = cols.product(row)
         rows.append({
-            "Source File": row.get(SOURCE_COL, ""), "Manufacturer": p["mfr"], "Model": p["model"],
-            "Product Name": p["product_name"],
+            "Source File": row.get(SOURCE_COL, ""), **cols.refs(row),
+            "Manufacturer": p["mfr"], "Model": p["model"], "Product Name": p["product_name"],
             "Recorded Product Dimensions": clean(row.get(prod_col)) if prod_col else "",
             "Recorded Package Dimensions": clean(row.get(pkg_col)) if pkg_col else "",
             "Product Unit System": r.get("product_unit_system", ""),
@@ -250,7 +273,7 @@ def save_excel(df, results: dict, path: str) -> None:
              ("fail", excel.BAD)] + excel.DEFAULT_STATUS_RULES
     wb = Workbook()
     excel.write_sheet(wb, "Dimensions Check", columns, rows,
-                      widths=[14, 16, 20, 36, 32, 32, 14, 14, 14, 32, 32, 22, 44, 55],
+                      widths=[14, 38, 16, 20, 36, 32, 32, 14, 14, 14, 32, 32, 22, 44, 55, 45],
                       status_cols=["Unit Consistency", "Status"], rules=rules, row_height=52)
     excel.write_summary(wb, "Summary", summarize(results), heading=f"{NAME} — Summary")
     wb.save(path)

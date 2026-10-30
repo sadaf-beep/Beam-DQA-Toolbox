@@ -11,7 +11,7 @@ tools/product_name_qa/core.py.
 from openpyxl import Workbook
 
 from tools.common import claude, excel
-from tools.common.data import ROW_COL, SOURCE_COL, Columns, clean, find_col
+from tools.common.data import REF_COLS, ROW_COL, SOURCE_COL, Columns, clean, find_col
 
 NAME = "Warranty Validation"
 LIFETIME_DAYS = 36500
@@ -103,6 +103,12 @@ def missing_columns(df) -> list:
     return missing
 
 
+# The Studio export uses -1 on items like licenses and mounting kits; it's
+# read as "no warranty recorded / not applicable", not as an invalid value.
+NOT_APPLICABLE = "-1"
+NOT_APPLICABLE_NOTE = "warranty_length is -1 (no warranty recorded / not applicable) — not checked"
+
+
 def _valid_days(value: str) -> bool:
     """A usable warranty is a positive number of days — blank, zero and
     text values are reported as Error without spending an API call."""
@@ -124,13 +130,17 @@ def _normalise(r: dict) -> dict:
     return r
 
 
-def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None) -> dict:
+def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None,
+        stop=None) -> dict:
     cols = Columns(df)
     w_col = _warranty_col(df)
     results, records = {}, []
     for _, row in df.iterrows():
         rec = cols.product(row)
         days = clean(row.get(w_col))
+        if days == NOT_APPLICABLE:
+            results[row[ROW_COL]] = _result("Skip", NOT_APPLICABLE_NOTE)
+            continue
         if not _valid_days(days):
             results[row[ROW_COL]] = _result(
                 "Error", f"warranty_length is blank, zero or not a number ({days or 'blank'}).")
@@ -148,7 +158,7 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
     answered = claude.run_batches(
         client, model, records, SYSTEM_PROMPT, use_search=True,
         batch_size=batch_size, batch_pause=batch_pause, log=log,
-        progress=progress, status=status, label=NAME,
+        progress=progress, status=status, label=NAME, stop=stop,
         review_result=lambda rec, why: _result(claude.NEEDS_REVIEW, why),
     )
     for row, r in answered.items():
@@ -170,7 +180,7 @@ def summarize(results: dict) -> list:
         ("Warning — using MFR standard / uncertain", _count(results, "warning"), excel.WARN),
         ("Unknown — no data found", _count(results, "unknown"), excel.INFO),
         ("Error — invalid warranty value", _count(results, "error"), excel.REVIEW),
-        ("Skipped — nothing to search for", _count(results, "skip"), excel.INFO),
+        ("Skipped — -1 (not applicable) or nothing to search for", _count(results, "skip"), excel.INFO),
         ("Needs human review (API couldn't process)", _count(results, claude.NEEDS_REVIEW), excel.REVIEW),
     ]
 
@@ -178,10 +188,10 @@ def summarize(results: dict) -> list:
 def save_excel(df, results: dict, path: str) -> None:
     cols = Columns(df)
     w_col = _warranty_col(df)
-    columns = ["Source File", "Manufacturer", "Model", "Product Name",
+    columns = ["Source File", REF_COLS[0], "Manufacturer", "Model", "Product Name",
                "Recorded Warranty (days)", "Warranty Type",
                "Verified Warranty (days)", "Verified Warranty Description",
-               "Status", "Source", "Note"]
+               "Status", "Source", "Note", REF_COLS[1]]
     rows = []
     for _, row in df.iterrows():
         r = results.get(row[ROW_COL])
@@ -189,8 +199,8 @@ def save_excel(df, results: dict, path: str) -> None:
             continue
         p = cols.product(row)
         rows.append({
-            "Source File": row.get(SOURCE_COL, ""), "Manufacturer": p["mfr"], "Model": p["model"],
-            "Product Name": p["product_name"],
+            "Source File": row.get(SOURCE_COL, ""), **cols.refs(row),
+            "Manufacturer": p["mfr"], "Model": p["model"], "Product Name": p["product_name"],
             "Recorded Warranty (days)": clean(row.get(w_col)) if w_col else "",
             "Warranty Type": r.get("warranty_type", ""),
             "Verified Warranty (days)": r.get("verified_warranty_days", ""),
@@ -199,7 +209,7 @@ def save_excel(df, results: dict, path: str) -> None:
         })
     wb = Workbook()
     excel.write_sheet(wb, "Warranty Check", columns, rows,
-                      widths=[16, 18, 22, 40, 20, 20, 22, 26, 18, 50, 55],
+                      widths=[16, 38, 18, 22, 40, 20, 20, 22, 26, 18, 50, 55, 45],
                       status_cols=["Status"], rules=RULES, row_height=48)
     excel.write_summary(wb, "Summary", summarize(results), heading=f"{NAME} — Summary")
     wb.save(path)

@@ -22,12 +22,12 @@ def run(ctx: ui.RunContext):
 
     results = core.run(df, ctx.client, ctx.model, ctx.batch_size, ctx.batch_pause, ctx.log,
                        progress=lambda done, total: ctx.set_progress(done / total),
-                       status=ctx.set_status)
+                       status=ctx.set_status, stop=ctx.stop)
     out_path = os.path.join(ctx.out_dir, f"Firmware_Docs_{datetime.now():%Y%m%d_%H%M}.xlsx")
     core.save_excel(df, results, out_path)
     values = list(results.values())
     flags = _count("flag")(values)
-    return values, out_path, f"Done — {len(values)} products checked, {flags} flagged."
+    return values, out_path, f"{len(values)} products checked, {flags} flagged."
 
 
 def build(page: ft.Page) -> ft.Control:
@@ -35,7 +35,9 @@ def build(page: ft.Page) -> ft.Control:
         page,
         run_label="Run Firmware & Docs Check",
         caption="Needs mfr and model, plus at least one of has_firmware, Firmware Added, documents added "
-                "(TRUE/FALSE). product_url is optional — it's checked first for downloads. Uses web search.",
+                "(TRUE/FALSE). Page URL (or product_url) is optional — it's checked first for downloads. "
+                "Document URLs / Resource URLs / Update URLs from the Studio export are used as evidence "
+                "and cross-checked against the added-flags. Uses web search.",
         needs_api=True,
         default_batch="5", default_pause="10s",
         stats=[

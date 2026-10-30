@@ -25,7 +25,7 @@ import numpy as np
 from openpyxl import Workbook
 
 from tools.common import excel
-from tools.common.data import ROW_COL, SOURCE_COL, Columns
+from tools.common.data import REF_COLS, ROW_COL, SOURCE_COL, Columns
 
 NAME = "Duplicate Detection"
 DEFAULT_THRESHOLD = 0.85
@@ -59,7 +59,7 @@ def _pair(r1, r2, dup_type, confidence, score, note) -> dict:
             "score": score, "note": note}
 
 
-def _candidate_models(models: list, need: float, progress=None) -> list:
+def _candidate_models(models: list, need: float, progress=None, stop=None) -> list:
     """Index pairs (a, b) of distinct unique models whose similarity could
     reach `need`. Uses 2·shared_chars/(len_a+len_b), an upper bound on
     SequenceMatcher.ratio(), so no qualifying pair is ever skipped."""
@@ -80,14 +80,19 @@ def _candidate_models(models: list, need: float, progress=None) -> list:
         bound = 2.0 * shared / (lengths[i] + lengths[i + 1:])
         for j in np.nonzero(bound >= need - 1e-9)[0]:
             out.append((i, i + 1 + int(j)))
-        if progress and i % step == 0:
-            progress(i, n)
+        if i % step == 0:
+            if stop is not None and stop.is_set():
+                break
+            if progress:
+                progress(i, n)
     return out
 
 
-def find_pairs(df, threshold: float = DEFAULT_THRESHOLD, progress=None) -> list:
+def find_pairs(df, threshold: float = DEFAULT_THRESHOLD, progress=None, stop=None) -> list:
     """All duplicate pairs in df, ordered by (row1, row2) with row1 < row2.
-    progress(done, total) is called as the near-match scan advances."""
+    progress(done, total) is called as the near-match scan advances. If the
+    `stop` event is set, the near-match scan ends early and the pairs found
+    so far are returned (exact/cross-brand pairs are always complete)."""
     cols = Columns(df)
     rows = []  # (row id, norm mfr, norm model)
     for _, row in df.iterrows():
@@ -126,7 +131,7 @@ def find_pairs(df, threshold: float = DEFAULT_THRESHOLD, progress=None) -> list:
             sim_cache[key] = similarity(a, b)
         return sim_cache[key]
 
-    for i, j in _candidate_models(models, need, progress):
+    for i, j in _candidate_models(models, need, progress, stop):
         for r1, m1 in by_model[models[i]]:
             for r2, m2 in by_model[models[j]]:
                 # Same argument order as the original (earlier row first) —
@@ -158,11 +163,14 @@ def _row_labels(df) -> dict:
             zip(df[ROW_COL], df.get(SOURCE_COL, [""] * len(df)), pos)}
 
 
-def run(df, log, progress=None, threshold: float = DEFAULT_THRESHOLD) -> dict:
+def run(df, log, progress=None, threshold: float = DEFAULT_THRESHOLD, stop=None) -> dict:
     """{row: result} for every row. Each result has qa_status (the most
     severe pair type, or Pass), qa_note listing every row it pairs with,
     and "pairs" (the pair dicts it's part of)."""
-    pairs = find_pairs(df, threshold, progress)
+    pairs = find_pairs(df, threshold, progress, stop)
+    if stop is not None and stop.is_set():
+        log("Stopped — near-match scan is incomplete, so results are partial "
+            "(exact and cross-brand duplicates are complete)", "warn")
     labels = _row_labels(df)
 
     results = {rid: {"pairs": []} for rid in df[ROW_COL]}
@@ -227,25 +235,25 @@ def write_pairs_sheet(wb: Workbook, df, pairs: list, title: str = "Duplicate Pai
     cols = Columns(df)
     info = {}
     for _, row in df.iterrows():
-        info[row[ROW_COL]] = {**cols.product(row), "src": row.get(SOURCE_COL, "")}
+        info[row[ROW_COL]] = {**cols.product(row), **cols.refs(row), "src": row.get(SOURCE_COL, "")}
     labels = _row_labels(df)
 
     columns = ["Type", "Confidence", "Similarity", "Note",
-               "Row 1", "MFR 1", "Model 1", "Product Name 1",
-               "Row 2", "MFR 2", "Model 2", "Product Name 2"]
+               "Row 1", "Product ID 1", "MFR 1", "Model 1", "Product Name 1",
+               "Row 2", "Product ID 2", "MFR 2", "Model 2", "Product Name 2"]
     rows = []
     for p in pairs:
         a, b = info[p["row1"]], info[p["row2"]]
         rows.append({
             "Type": p["type"], "Confidence": p["confidence"],
             "Similarity": f"{round(p['score'] * 100)}%", "Note": p["note"],
-            "Row 1": labels[p["row1"]], "MFR 1": a["mfr"], "Model 1": a["model"],
-            "Product Name 1": a["product_name"],
-            "Row 2": labels[p["row2"]], "MFR 2": b["mfr"], "Model 2": b["model"],
-            "Product Name 2": b["product_name"],
+            "Row 1": labels[p["row1"]], "Product ID 1": a["Product ID"],
+            "MFR 1": a["mfr"], "Model 1": a["model"], "Product Name 1": a["product_name"],
+            "Row 2": labels[p["row2"]], "Product ID 2": b["Product ID"],
+            "MFR 2": b["mfr"], "Model 2": b["model"], "Product Name 2": b["product_name"],
         })
     excel.write_sheet(wb, title, columns, rows,
-                      widths=[16, 12, 11, 48, 22, 18, 20, 38, 22, 18, 20, 38],
+                      widths=[16, 12, 11, 48, 22, 38, 18, 20, 38, 22, 38, 18, 20, 38],
                       status_cols=["Type", "Confidence"], row_height=40,
                       rules=[("exact", excel.BAD), ("definite", excel.BAD), ("cross", excel.WARN),
                              ("near", excel.WARN), ("likely", excel.WARN), ("possible", excel.WARN),
@@ -255,18 +263,19 @@ def write_pairs_sheet(wb: Workbook, df, pairs: list, title: str = "Duplicate Pai
 def save_excel(df, results: dict, path: str, pairs: list = None) -> None:
     pairs = pairs_from_results(results) if pairs is None else pairs
     cols = Columns(df)
-    columns = ["Source File", "Manufacturer", "Model", "Product Name", "Duplicate Status", "Matches"]
+    columns = ["Source File", REF_COLS[0], "Manufacturer", "Model", "Product Name",
+               "Duplicate Status", "Matches", REF_COLS[1]]
     rows = []
     for _, row in df.iterrows():
         r = results.get(row[ROW_COL])
         if r is None:
             continue
         p = cols.product(row)
-        rows.append({"Source File": row.get(SOURCE_COL, ""), "Manufacturer": p["mfr"],
+        rows.append({"Source File": row.get(SOURCE_COL, ""), **cols.refs(row), "Manufacturer": p["mfr"],
                      "Model": p["model"], "Product Name": p["product_name"],
                      "Duplicate Status": r["qa_status"], "Matches": r["qa_note"]})
     wb = Workbook()
-    excel.write_sheet(wb, "Products", columns, rows, widths=[18, 20, 24, 44, 16, 70],
+    excel.write_sheet(wb, "Products", columns, rows, widths=[18, 38, 20, 24, 44, 16, 70, 45],
                       status_cols=["Duplicate Status"], row_height=30)
     write_pairs_sheet(wb, df, pairs)
     excel.write_summary(wb, "Summary", summarize(results, pairs), heading=f"{NAME} — Summary")

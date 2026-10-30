@@ -24,12 +24,12 @@ def run(ctx: ui.RunContext):
     ctx.log(f"Comparing {len(df)} products (near-match threshold {int(threshold * 100)}%)...", "dim")
     ctx.set_status("Comparing products...")
     results = core.run(df, ctx.log, progress=lambda done, total: ctx.set_progress(done / max(total, 1)),
-                       threshold=threshold)
+                       threshold=threshold, stop=ctx.stop)
     out_path = os.path.join(ctx.out_dir, f"Duplicates_{datetime.now():%Y%m%d_%H%M}.xlsx")
     core.save_excel(df, results, out_path)
     values = list(results.values())
     pairs = len(core.pairs_from_results(results))
-    return values, out_path, f"Done — {len(values)} products checked, {pairs} duplicate pair(s)."
+    return values, out_path, f"{len(values)} products checked, {pairs} duplicate pair(s)."
 
 
 def build(page: ft.Page) -> ft.Control:

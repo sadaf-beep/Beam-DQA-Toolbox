@@ -17,7 +17,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from tools.common import claude, excel
-from tools.common.data import ROW_COL, Columns, find_col
+from tools.common.data import REF_COLS, ROW_COL, Columns, find_col
 
 NAME = "Status Check"
 
@@ -140,7 +140,7 @@ def _thin_border():
 def save_excel(results: list, output_path: str) -> None:
     """Write results to a formatted Excel workbook with a Results + Summary sheet."""
     cols = ["Source File", "Manufacturer", "Model", "Product Name",
-            "DB Status", "Verified Status", "Match", "Suggested Status", "Reason"]
+            "DB Status", "Verified Status", "Match", "Suggested Status", "Reason", *REF_COLS]
     df = pd.DataFrame(results)
     for c in cols:
         if c not in df.columns:
@@ -150,7 +150,7 @@ def save_excel(results: list, output_path: str) -> None:
     wb = load_workbook(output_path)
     ws = wb["Results"]
 
-    widths = [18, 20, 24, 44, 14, 16, 16, 16, 55]
+    widths = [18, 20, 24, 44, 14, 16, 16, 16, 55, 38, 45]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -336,17 +336,37 @@ def verify_batch(client: anthropic.Anthropic, model: str, batch_records: list,
         return _needs_review(batch_records, f"Unexpected error: {str(e)[:100]}")
 
 
+def _canonical_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename whatever headers the file uses (Studio export "Page URL",
+    "Product Name", older "product_url", ...) to the names this module and
+    its prompt work with, and add the report's reference columns."""
+    cols = Columns(df)
+    rename = {}
+    for found, canonical in ((cols.mfr, "mfr"), (cols.model, "model"), (cols.name, "product name"),
+                             (find_col(df, "product_status", "status"), "product_status"),
+                             (cols.url, URL_COL)):
+        if found is not None and found != canonical:
+            rename[found] = canonical
+    out = df.rename(columns=rename)
+    refs = df.apply(lambda r: pd.Series(cols.refs(r)), axis=1) if len(df) else pd.DataFrame(columns=REF_COLS)
+    for c in REF_COLS:
+        out[c] = refs[c] if c in refs else ""
+    return out
+
+
 def check_file(path: str, client: anthropic.Anthropic, model: str, batch_size: int,
                 batch_pause: int, skip_keys: set, progress_callback, log_callback,
-                status_callback):
+                status_callback, stop=None):
     """
     Verify all rows of one CSV against Claude. Returns
     (file_results, total_rows, skipped_already_verified_count).
 
     progress_callback(pct, done_batches, total_batches) and log_callback(msg, tag)
     follow the same shape as the Link Checker's core.check_file callbacks.
+    `stop` is an optional threading.Event checked before each batch — rows
+    not reached are simply left out, so a Recovery-mode re-run picks them up.
     """
-    df = load_df(path)
+    df = _canonical_columns(load_df(path))
 
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
@@ -407,8 +427,15 @@ def check_file(path: str, client: anthropic.Anthropic, model: str, batch_size: i
         return file_results, total, skipped
 
     num_batches = (total_searchable + batch_size - 1) // batch_size
+    refs_by_key = {
+        _product_key(r.get("mfr", ""), r.get("model", ""), r.get("product name", "")): {c: r[c] for c in REF_COLS}
+        for r in df.to_dict(orient="records")
+    }
 
     for bn, start in enumerate(range(0, total_searchable, batch_size), 1):
+        if stop is not None and stop.is_set():
+            log_callback(f"Stopped — {total_searchable - start} product(s) in this file not checked", "warn")
+            break
         end = min(start + batch_size, total_searchable)
         batch = df.iloc[start:end][cols].to_dict(orient="records")
 
@@ -434,6 +461,8 @@ def check_file(path: str, client: anthropic.Anthropic, model: str, batch_size: i
 
         for r in results:
             r["Source File"] = name
+            r.update(refs_by_key.get(
+                _product_key(r.get("Manufacturer", ""), r.get("Model", ""), r.get("Product Name", "")), {}))
         file_results.extend(results)
 
         needs_review = sum(1 for r in results if r.get("Verified Status") == NEEDS_REVIEW_STATUS)
@@ -446,6 +475,8 @@ def check_file(path: str, client: anthropic.Anthropic, model: str, batch_size: i
 
         if bn < num_batches:
             for s in range(batch_pause, 0, -1):
+                if stop is not None and stop.is_set():
+                    break
                 status_callback(f"Pausing {s}s before next batch...")
                 time.sleep(1)
 
@@ -484,7 +515,7 @@ def _pipeline_result(r: dict) -> dict:
     return r
 
 
-def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None) -> dict:
+def run(df, client, model, batch_size, batch_pause, log, progress=None, status=None, stop=None) -> dict:
     cols = Columns(df)
     status_col = find_col(df, "product_status", "status")
     results, records = {}, []
@@ -512,7 +543,7 @@ def run(df, client, model, batch_size, batch_pause, log, progress=None, status=N
     answered = claude.run_batches(
         client, model, records, SYSTEM_PROMPT, use_search=True,
         batch_size=batch_size, batch_pause=batch_pause, log=log,
-        progress=progress, status=status, label=NAME,
+        progress=progress, status=status, label=NAME, stop=stop,
         review_result=lambda rec, why: _needs_review([rec], why)[0],
     )
     for row, r in answered.items():

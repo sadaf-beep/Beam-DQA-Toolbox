@@ -21,19 +21,20 @@ def run(ctx: ui.RunContext):
         raise ValueError(f"Missing columns: {', '.join(missing)}")
 
     ctx.set_status("Checking URLs...")
-    results = core.run(df, ctx.log, progress=lambda done, total: ctx.set_progress(done / max(total, 1)))
+    results = core.run(df, ctx.log, progress=lambda done, total: ctx.set_progress(done / max(total, 1)),
+                       stop=ctx.stop)
     out_path = os.path.join(ctx.out_dir, f"OEM_URL_Check_{datetime.now():%Y%m%d_%H%M}.xlsx")
     core.save_excel(df, results, out_path)
     values = list(results.values())
     fails = _count("Fail")(values)
-    return values, out_path, f"Done — {len(values)} URLs checked, {fails} flag mismatch(es)."
+    return values, out_path, f"{len(values)} URLs checked, {fails} flag mismatch(es)."
 
 
 def build(page: ft.Page) -> ft.Control:
     return ui.tool_screen(
         page,
         run_label="Check OEM URLs",
-        caption="Needs a product_url column (mfr and is_oem_url recommended). Classifies each URL as the "
+        caption="Needs a Page URL (or product_url) column (mfr and is_oem_url recommended). Classifies each URL as the "
                 "manufacturer's own site, a retailer or unknown, and checks it against is_oem_url — no API, "
                 "no web requests.",
         stats=[

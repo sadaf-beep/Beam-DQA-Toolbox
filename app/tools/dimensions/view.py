@@ -22,12 +22,12 @@ def run(ctx: ui.RunContext):
 
     results = core.run(df, ctx.client, ctx.model, ctx.batch_size, ctx.batch_pause, ctx.log,
                        progress=lambda done, total: ctx.set_progress(done / total),
-                       status=ctx.set_status)
+                       status=ctx.set_status, stop=ctx.stop)
     out_path = os.path.join(ctx.out_dir, f"Dimensions_Validation_{datetime.now():%Y%m%d_%H%M}.xlsx")
     core.save_excel(df, results, out_path)
     values = list(results.values())
     issues = _count(lambda s: s.startswith(("fail", "flag")))(values)
-    return values, out_path, f"Done — {len(values)} products checked, {issues} issue(s) to fix."
+    return values, out_path, f"{len(values)} products checked, {issues} issue(s) to fix."
 
 
 def build(page: ft.Page) -> ft.Control:
@@ -35,7 +35,7 @@ def build(page: ft.Page) -> ft.Control:
         page,
         run_label="Run Dimensions Check",
         caption="Needs mfr, model and product_dimension and/or package_dimensions columns "
-                "(product_url optional). Checks unit consistency, fills gaps and compares against "
+                "(Page URL or product_url optional; unitless Studio JSON is supported). Checks unit consistency, fills gaps and compares against "
                 "manufacturer specs using Claude with web search.",
         needs_api=True,
         default_batch="5", default_pause="10s",

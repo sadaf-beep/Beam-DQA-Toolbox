@@ -42,6 +42,9 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 _LEGACY_CONFIG_FILE = CONFIG_DIR / "StatusChecker" / "config.json"
 
 NEEDS_REVIEW = "Needs Review"
+# Reason given to products a stopped run never reached — they're flagged
+# for review (not passed), and recovery mode picks them up again.
+STOPPED_NOTE = "Run was stopped before this product was checked"
 
 # Status codes where every remaining call is guaranteed to fail the same
 # way (bad/expired key, no access, wrong model id) — the whole run should
@@ -131,7 +134,7 @@ def ask_json(client: anthropic.Anthropic, model: str, system_prompt: str,
 def run_batches(client, model: str, records: list, system_prompt: str, *,
                 use_search: bool, batch_size: int, batch_pause: int,
                 review_result, log, progress=None, status=None,
-                label: str = "") -> dict:
+                label: str = "", stop=None) -> dict:
     """
     Send `records` to Claude `batch_size` at a time.
 
@@ -141,7 +144,10 @@ def run_batches(client, model: str, records: list, system_prompt: str, *,
     didn't answer, or whose batch failed, get review_result(record, reason).
 
     log(msg, tag), progress(done_batches, total_batches), status(text) are
-    UI callbacks. Raises FatalAPIError when the run can't succeed at all.
+    UI callbacks. `stop` is an optional threading.Event: once set, no
+    further batches are sent and the remaining rows get
+    review_result(record, STOPPED_NOTE). Raises FatalAPIError when the run
+    can't succeed at all.
     """
     results = {}
     total = len(records)
@@ -152,6 +158,12 @@ def run_batches(client, model: str, records: list, system_prompt: str, *,
 
     for bn, start in enumerate(range(0, total, batch_size), 1):
         batch = records[start:start + batch_size]
+        if stop is not None and stop.is_set():
+            remaining = records[start:]
+            log(f"Stopped — {len(remaining)} product(s) not checked", "warn")
+            for r in remaining:
+                results[r["_row"]] = review_result(r, STOPPED_NOTE)
+            break
         by_id = {str(r["_row"]): r for r in batch}
         payload = []
         for r in batch:
@@ -213,6 +225,8 @@ def run_batches(client, model: str, records: list, system_prompt: str, *,
             progress(bn, num_batches)
         if bn < num_batches and batch_pause > 0:
             for s in range(batch_pause, 0, -1):
+                if stop is not None and stop.is_set():
+                    break
                 if status:
                     status(f"{prefix}pausing {s}s before next batch...")
                 time.sleep(1)

@@ -14,12 +14,13 @@ NAME = "File Splitter"
 
 
 def split_file(path: str, out_dir: str, rows_per_file: int, prefix: str = "",
-               log=None, progress=None) -> list:
+               log=None, progress=None, stop=None) -> list:
     """
     Split one file into CSVs named <prefix>1.csv, <prefix>2.csv, ... in
     out_dir. A blank prefix uses the input file's name (spaces/dashes
     turned into underscores). Returns [{"file": path, "rows": n}, ...].
     progress(done_files, total_files) is called after each file is written.
+    If the `stop` event is set, no further chunks are written.
     """
     if rows_per_file < 1:
         raise ValueError("Rows per file must be at least 1")
@@ -34,6 +35,10 @@ def split_file(path: str, out_dir: str, rows_per_file: int, prefix: str = "",
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     written = []
     for i in range(num_files):
+        if stop is not None and stop.is_set():
+            if log:
+                log(f"Stopped — {num_files - i} chunk(s) of {src.name} not written", "warn")
+            break
         chunk = df.iloc[i * rows_per_file:(i + 1) * rows_per_file]
         out = Path(out_dir) / f"{prefix}{i + 1}.csv"
         chunk.to_csv(out, index=False, encoding="utf-8")

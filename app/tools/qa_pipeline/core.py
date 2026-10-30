@@ -54,12 +54,14 @@ def concern(status) -> str:
 
 
 def run_pipeline(df, stage_keys, *, client=None, model="", batch_size=5, batch_pause=10,
-                 log, progress=None, status=None, options=None):
+                 log, progress=None, status=None, options=None, stop=None):
     """
     Returns (stage_results, stage_notes): stage_results maps stage key to
     {row: result}; stage_notes maps stage key to a one-line outcome
     ("12 issues", "skipped — missing columns: ...", "error: ...").
-    progress(fraction 0..1) covers the whole pipeline.
+    progress(fraction 0..1) covers the whole pipeline. When `stop` (a
+    threading.Event) is set, the running stage finishes its current batch
+    and every later stage is skipped — the report still gets written.
     """
     options = options or {}
     chosen = [s for s in STAGES if s.key in stage_keys]
@@ -77,6 +79,11 @@ def run_pipeline(df, stage_keys, *, client=None, model="", batch_size=5, batch_p
         if status:
             status(f"Stage {i + 1}/{len(chosen)}: {stage.label}")
 
+        if stop is not None and stop.is_set():
+            stage_notes[stage.key] = "skipped — run stopped"
+            log("Skipped — run stopped", "warn")
+            continue
+
         if stage.uses_api and api_stopped:
             stage_notes[stage.key] = f"skipped — {api_stopped}"
             log(f"Skipped — {api_stopped}", "warn")
@@ -92,12 +99,12 @@ def run_pipeline(df, stage_keys, *, client=None, model="", batch_size=5, batch_p
         try:
             if stage.uses_api:
                 res = mod.run(df, client, model, batch_size, batch_pause, log,
-                              progress=stage_progress, status=status)
+                              progress=stage_progress, status=status, stop=stop)
             elif stage.key == "duplicates":
                 res = mod.run(df, log, progress=stage_progress,
-                              threshold=options.get("dup_threshold", 0.85))
+                              threshold=options.get("dup_threshold", 0.85), stop=stop)
             else:
-                res = mod.run(df, log, progress=stage_progress)
+                res = mod.run(df, log, progress=stage_progress, stop=stop)
         except claude.FatalAPIError as ex:
             api_stopped = str(ex)
             stage_notes[stage.key] = f"stopped — {ex}"
@@ -126,7 +133,8 @@ def build_master_rows(df, stage_results) -> list:
         rn = row[ROW_COL]
         p = cols.product(row)
         merged = {"Manufacturer": p["mfr"], "Model": p["model"], "Product Name": p["product_name"],
-                  "Source File": row.get(SOURCE_COL, ""), "File Row": int(file_row[idx])}
+                  "Source File": row.get(SOURCE_COL, ""), "File Row": int(file_row[idx]),
+                  **cols.refs(row)}
         levels, summary = [], []
         for stage in STAGES:
             if stage.key not in stage_results:
@@ -151,12 +159,14 @@ def save_master_report(df, stage_results, stage_notes, path: str) -> list:
     master = build_master_rows(df, stage_results)
     ran = [s for s in STAGES if s.key in stage_results]
 
-    columns = ["Manufacturer", "Model", "Product Name", "Source File", "File Row",
+    columns = ["Manufacturer", "Model", "Product Name", "Source File", "File Row", "Product ID",
                "Concern Level", "Concern Summary"]
-    widths = [18, 20, 38, 18, 8, 13, 55]
+    widths = [18, 20, 38, 18, 8, 38, 13, 55]
     for s in ran:
         columns += [s.label, f"{s.label} Note"]
         widths += [14, 45]
+    columns.append("Beam Insights URL")
+    widths.append(45)
 
     wb = Workbook()
     excel.write_sheet(wb, "Master QA", columns, master, widths=widths,

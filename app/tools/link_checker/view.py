@@ -108,6 +108,16 @@ def build(page: ft.Page) -> ft.Control:
         "Step 3 — Run Checker", icon=ft.Icons.PLAY_ARROW,
         bgcolor=theme.ACCENT, color="white", disabled=True,
     )
+    stop_button = ft.OutlinedButton("Stop", icon=ft.Icons.STOP_CIRCLE, icon_color=theme.BAD,
+                                     visible=False)
+    stop_event = {"event": threading.Event()}
+
+    def request_stop(e=None):
+        stop_event["event"].set()
+        stop_button.disabled = True
+        log("Stopping — unchecked links will be listed in the NEEDS_REVIEW file...", "warn")
+
+    stop_button.on_click = request_stop
 
     def log(msg, tag="info"):
         color = {"ok": theme.GOOD, "bad": theme.BAD, "info": theme.INFO,
@@ -154,14 +164,14 @@ def build(page: ft.Page) -> ft.Control:
 
             try:
                 df = core.load_df(path)
-                missing = [c for c in [core.IMAGE_COL, core.PRODUCT_COL] if c not in df.columns]
-                if missing:
-                    row.set_info(f'Missing columns: {", ".join(missing)}', theme.BAD)
+                img_col, prod_col = core.link_columns(df)
+                if img_col is None and prod_col is None:
+                    row.set_info("Missing columns: Image URL / Page URL", theme.BAD)
                     row.set_status("Error", theme.BAD)
                 else:
                     row.df = df
-                    n_img = int(df[core.IMAGE_COL].notna().sum())
-                    n_prod = int(df[core.PRODUCT_COL].notna().sum())
+                    n_img = int(df[img_col].notna().sum()) if img_col else 0
+                    n_prod = int(df[prod_col].notna().sum()) if prod_col else 0
                     row.set_info(f"{len(df)} rows  •  {n_img} image URLs  •  {n_prod} product URLs", theme.GOOD)
                     row.set_status("Ready", theme.GOOD)
             except Exception as ex:
@@ -207,7 +217,7 @@ def build(page: ft.Page) -> ft.Control:
 
         try:
             broken_df, review_df, total_rows, broken_count, review_count = core.check_file(
-                row.path, session, executor, on_progress, on_log)
+                row.path, session, executor, on_progress, on_log, stop=stop_event["event"])
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
             base_name = os.path.splitext(fname)[0]
@@ -251,6 +261,7 @@ def build(page: ft.Page) -> ft.Control:
         valid = [r for r in rows if r.df is not None]
         if all(r.done for r in valid):
             running["value"] = False
+            stop_button.visible = False
             check_ready()
             log(f"\nAll files complete! Results saved to: {save_dir['path']}\n", "ok")
             page.open(ft.SnackBar(ft.Text(f"All {len(valid)} file(s) checked — results in {save_dir['path']}")))
@@ -265,6 +276,9 @@ def build(page: ft.Page) -> ft.Control:
 
         running["value"] = True
         run_button.disabled = True
+        stop_event["event"] = threading.Event()
+        stop_button.visible = True
+        stop_button.disabled = False
         broken_val.value = "0"
         review_val.value = "0"
         done_val.value = "0"
@@ -285,7 +299,7 @@ def build(page: ft.Page) -> ft.Control:
             ft.Text("Step 1 — Add your files", weight=ft.FontWeight.BOLD, color=theme.TEXT),
             ft.Row(
                 [
-                    ft.Text("CSV or Excel  •  needs Image Url & product_url columns",
+                    ft.Text("CSV or Excel  •  needs an Image URL and/or Page URL column",
                             size=11, color=theme.MUTED),
                     ft.Button(
                         "+ Add Files", icon=ft.Icons.ADD, bgcolor=theme.ACCENT, color="white",
@@ -319,6 +333,7 @@ def build(page: ft.Page) -> ft.Control:
             ),
             ft.Container(expand=True),
             ft.OutlinedButton("Clear All", on_click=clear_all),
+            stop_button,
             run_button,
         ],
         spacing=10,

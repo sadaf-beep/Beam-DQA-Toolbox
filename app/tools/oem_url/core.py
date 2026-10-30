@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from openpyxl import Workbook
 
 from tools.common import excel
-from tools.common.data import ROW_COL, SOURCE_COL, Columns, clean, find_col
+from tools.common.data import REF_COLS, ROW_COL, SOURCE_COL, Columns, clean, find_col
 
 NAME = "OEM URL Check"
 
@@ -173,7 +173,7 @@ _BLANK = ("", "nan", "none", "#n/a", "n/a")
 
 
 def missing_columns(df) -> list:
-    return [] if Columns(df).url else ["product_url"]
+    return [] if Columns(df).url else ["Page URL (or product_url)"]
 
 
 def url_host(url: str) -> str:
@@ -228,7 +228,7 @@ def check_record(mfr: str, product_url: str, flag) -> dict:
 
     url = clean(product_url)
     if url.lower() in _BLANK:
-        return res("Error", "", "No URL", "product_url is blank or missing")
+        return res("Error", "", "No URL", "Page URL is blank or missing")
     host = url_host(url)
     if not host:
         return res("Error", "", "Malformed URL", f"Cannot parse domain from: {url[:60]}")
@@ -269,7 +269,10 @@ def _flag(val):
     return clean(val).upper() in ("TRUE", "1", "YES", "1.0")
 
 
-def run(df, log, progress=None) -> dict:
+def run(df, log, progress=None, stop=None) -> dict:
+    # `stop` is accepted for the shared engine signature but not polled —
+    # this is a local string check that finishes 10k rows in well under a
+    # second, and stopping midway would leave rows without a result.
     cols = Columns(df)
     flag_col = find_col(df, "is_oem_url", "is oem url")
     if flag_col is None:
@@ -311,8 +314,8 @@ def summarize(results: dict) -> list:
 
 def save_excel(df, results: dict, path: str) -> None:
     cols = Columns(df)
-    columns = ["Source File", "Manufacturer", "Model", "Product Name", "Product URL",
-               "is_oem_url (DB)", "Detected Domain", "Domain Type", "Status", "Note"]
+    columns = ["Source File", REF_COLS[0], "Manufacturer", "Model", "Product Name", "Page URL",
+               "is_oem_url (DB)", "Detected Domain", "Domain Type", "Status", "Note", REF_COLS[1]]
     rows = []
     for _, row in df.iterrows():
         r = results.get(row[ROW_COL])
@@ -320,14 +323,15 @@ def save_excel(df, results: dict, path: str) -> None:
             continue
         p = cols.product(row)
         rows.append({
-            "Source File": row.get(SOURCE_COL, ""), "Manufacturer": p["mfr"], "Model": p["model"],
-            "Product Name": p["product_name"], "Product URL": clean(row.get(cols.url)) if cols.url else "",
+            "Source File": row.get(SOURCE_COL, ""), **cols.refs(row), "Manufacturer": p["mfr"],
+            "Model": p["model"], "Product Name": p["product_name"],
+            "Page URL": clean(row.get(cols.url)) if cols.url else "",
             "is_oem_url (DB)": r["recorded_flag"], "Detected Domain": r["domain"],
             "Domain Type": r["domain_type"], "Status": r["qa_status"], "Note": r["qa_note"],
         })
     wb = Workbook()
     excel.write_sheet(wb, "OEM URL Check", columns, rows,
-                      widths=[16, 18, 22, 40, 50, 14, 24, 20, 10, 60],
+                      widths=[16, 38, 18, 22, 40, 50, 14, 24, 20, 10, 60, 45],
                       status_cols=["Status"], row_height=44)
     excel.write_summary(wb, "Summary", summarize(results), heading=f"{NAME} — Summary")
     wb.save(path)
