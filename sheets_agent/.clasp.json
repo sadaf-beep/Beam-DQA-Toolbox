@@ -1,0 +1,17 @@
+{
+  "scriptId": "1tuMH0sra3V9THWYmvVqDWNMU2OzuL0M69-ImPdnqNgcEAqdBqBXafCS9",
+  "rootDir": "src",
+  "parentId": "1qt3q9vpWC-TgByQ1IZM2J1U23NSfkz9vFVglnoZE8ik",
+  "scriptExtensions": [
+    ".js",
+    ".gs"
+  ],
+  "htmlExtensions": [
+    ".html"
+  ],
+  "jsonExtensions": [
+    ".json"
+  ],
+  "filePushOrder": ["src/Reference.js", "src/Code.js", "src/Claude.js", "src/Checks.js", "src/Agent.js"],
+  "skipSubdirectories": false
+}

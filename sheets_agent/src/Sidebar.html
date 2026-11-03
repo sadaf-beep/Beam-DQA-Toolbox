@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<style>
+  :root { --bg:#ffffff; --surface:#f1f3f9; --accent:#3b82f6; --text:#1f2937; --muted:#6b7280; --bad:#dc2626; --border:#e5e7eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: Arial, sans-serif; font-size:13px; color:var(--text); background:var(--bg);
+         display:flex; flex-direction:column; height:100vh; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid var(--border); }
+  header b { font-size:14px; }
+  .link { background:none; border:none; color:var(--accent); cursor:pointer; font-size:12px; padding:0; }
+  #settings { display:none; padding:10px 12px; background:var(--surface); border-bottom:1px solid var(--border); }
+  #settings label { display:block; font-size:11px; color:var(--muted); margin:6px 0 2px; }
+  #settings input, #settings select { width:100%; padding:6px; border:1px solid var(--border); border-radius:6px; }
+  #info { font-size:11px; color:var(--muted); padding:6px 12px; }
+  #chat { flex:1; overflow-y:auto; padding:10px 12px; }
+  .msg { margin:8px 0; padding:9px 11px; border-radius:10px; line-height:1.45; white-space:normal; word-wrap:break-word; }
+  .me { background:var(--accent); color:#fff; margin-left:30px; }
+  .agent { background:var(--surface); margin-right:10px; }
+  .agent ul { margin:4px 0; padding-left:18px; }
+  .err { background:#fee2e2; color:var(--bad); }
+  #status { font-size:11px; color:var(--muted); padding:0 12px 4px; min-height:16px; }
+  #suggest { padding:0 12px; display:flex; flex-wrap:wrap; gap:6px; }
+  #suggest button { font-size:11px; padding:5px 8px; border:1px solid var(--border); border-radius:12px; background:#fff; cursor:pointer; }
+  #bar { display:flex; gap:6px; padding:8px 12px 12px; }
+  #text { flex:1; padding:8px; border:1px solid var(--border); border-radius:8px; resize:none; font-family:inherit; font-size:13px; }
+  .btn { padding:8px 12px; border:none; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  #stop { background:var(--bad); display:none; }
+</style>
+</head>
+<body>
+<header><b>DQA Agent</b><button class="link" onclick="toggleSettings()">Settings</button></header>
+<div id="settings">
+  <label>Anthropic API key (saved privately for you)</label>
+  <input id="key" type="password" placeholder="sk-ant-...">
+  <label>Model for the checks</label>
+  <select id="model"></select>
+  <div style="margin-top:8px"><button class="btn" onclick="saveSettings()">Save</button> <span id="saved" style="font-size:11px;color:var(--muted)"></span></div>
+</div>
+<div id="info">Loading…</div>
+<div id="chat"></div>
+<div id="status"></div>
+<div id="suggest"></div>
+<div id="bar">
+  <textarea id="text" rows="2" placeholder="Ask the DQA agent…"></textarea>
+  <button class="btn" id="send" onclick="send()">Send</button>
+  <button class="btn" id="stop" onclick="stop()">Stop</button>
+</div>
+
+<script>
+  var SUGGESTIONS = ["What's in this sheet?", 'Find duplicate products', 'Check the product pages and links',
+                     'Check the status of every product', 'What should I fix first?'];
+  var state = {messages: [], pending: null, input: null};
+  var busy = false;
+
+  function el(id) { return document.getElementById(id); }
+
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+  // Small markdown: **bold**, bullet and numbered lists, links, paragraphs.
+  function md(s) {
+    var lines = esc(s).split('\n'), out = [], list = null;
+    lines.forEach(function (ln) {
+      var m = ln.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)$/);
+      if (m) { if (!list) { list = []; } list.push('<li>' + m[1] + '</li>'); return; }
+      if (list) { out.push('<ul>' + list.join('') + '</ul>'); list = null; }
+      if (ln.trim()) out.push('<div>' + ln + '</div>');
+    });
+    if (list) out.push('<ul>' + list.join('') + '</ul>');
+    return out.join('')
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank">$1</a>');
+  }
+
+  function add(text, who) {
+    var d = document.createElement('div');
+    d.className = 'msg ' + who;
+    d.innerHTML = who === 'me' ? esc(text) : md(text);
+    el('chat').appendChild(d);
+    el('chat').scrollTop = el('chat').scrollHeight;
+  }
+
+  function setBusy(b) {
+    busy = b;
+    el('send').disabled = b;
+    el('stop').style.display = b ? 'inline-block' : 'none';
+    el('stop').disabled = false;
+    Array.prototype.forEach.call(el('suggest').children, function (x) { x.disabled = b; });
+    if (!b) el('status').textContent = '';
+  }
+
+  function step() {
+    google.script.run
+      .withSuccessHandler(function (res) {
+        state = res.state;
+        (res.replies || []).forEach(function (r) { add(r, 'agent'); });
+        if (res.status) el('status').textContent = res.status;
+        if (res.done) { setBusy(false); refreshInfo(); } else { step(); }
+      })
+      .withFailureHandler(function (err) {
+        add('Something went wrong: ' + (err && err.message ? err.message : err), 'err');
+        setBusy(false);
+      })
+      .agentStep(state);
+  }
+
+  function send(text) {
+    text = (text || el('text').value || '').trim();
+    if (!text || busy) return;
+    el('text').value = '';
+    add(text, 'me');
+    state.input = text;
+    setBusy(true);
+    el('status').textContent = 'Thinking...';
+    step();
+  }
+
+  function stop() {
+    el('stop').disabled = true;
+    el('status').textContent = 'Stopping after the current step...';
+    google.script.run.requestStop();
+  }
+
+  function toggleSettings() {
+    var s = el('settings');
+    s.style.display = s.style.display === 'block' ? 'none' : 'block';
+  }
+
+  function showInfo(s) {
+    el('info').textContent = (s.sheetName ? 'Products: ' + s.products + ' on tab "' + s.sheetName + '"' : 'No product tab found (needs an "mfr" column)') +
+      (s.hasKey ? '' : '  •  Add your API key in Settings');
+    var sel = el('model');
+    sel.innerHTML = '';
+    s.checkModels.forEach(function (m) {
+      var o = document.createElement('option'); o.textContent = m; o.selected = m === s.checkModel; sel.appendChild(o);
+    });
+    if (!s.hasKey) el('settings').style.display = 'block';
+  }
+
+  function refreshInfo() { google.script.run.withSuccessHandler(showInfo).getSettings(); }
+
+  function saveSettings() {
+    google.script.run
+      .withSuccessHandler(function (s) { el('key').value = ''; el('saved').textContent = 'Saved'; showInfo(s); })
+      .withFailureHandler(function (e) { el('saved').textContent = e.message; })
+      .saveSettings({apiKey: el('key').value, checkModel: el('model').value});
+  }
+
+  SUGGESTIONS.forEach(function (s) {
+    var b = document.createElement('button'); b.textContent = s; b.onclick = function () { send(s); };
+    el('suggest').appendChild(b);
+  });
+  el('text').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  add("Hi! I check the products in this sheet against the DQA rulebook. Ask me anything, or pick a suggestion below. I only report — I never change your product data.", 'agent');
+  refreshInfo();
+</script>
+</body>
+</html>
