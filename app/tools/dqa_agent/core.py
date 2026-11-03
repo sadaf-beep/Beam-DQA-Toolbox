@@ -308,10 +308,12 @@ class AgentSession:
         else:
             res = mod.run(df, self.log, progress=progress, stop=self.stop)
         self.progress(1.0)
+        # Keep what finished (unreached products come back as Needs Review)
+        # even when the user stopped the run.
+        self.results.setdefault(check, {}).update(res)
         if self.stop is not None and self.stop.is_set():
             raise StopRequested()
 
-        self.results.setdefault(check, {}).update(res)
         flagged = sum(1 for r in res.values() if todo.items_for(check, r))
         lines = self._todo_lines(check=check, rows=set(res))
         self.notes[check] = f"{len(res)} checked, {flagged} with problems"

@@ -3,6 +3,9 @@
 Beam Dynamics' product data QA suite — a desktop app for checking product
 feeds (CSV/Excel). Every tool can run on its own, or all together:
 
+**Using the DQA Agent (Toolbox and Google Sheets): see the
+[DQA Agent User Manual](docs/DQA_Agent_Manual.md).**
+
 - **DQA Agent** — load a product file and chat: "what's in this file?",
   "check the status of the Sony products", "what should I fix first?". It
   runs the checks below for you, follows the DQA rulebook
